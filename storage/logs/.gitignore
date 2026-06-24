@@ -1,0 +1,6 @@
+*
+!.gitignore
+
+python-services/audio-analysis-service/venv/
+python-services/audio-analysis-service/__pycache__/
+*.pyc
