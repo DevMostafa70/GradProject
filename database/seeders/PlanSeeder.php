@@ -14,7 +14,7 @@ final class PlanSeeder extends Seeder
     {
         $plans = [
             [
-                'code' => PlanCode::Starter->value,
+                'slug' => PlanCode::Starter->value,
                 'name' => 'Starter',
                 'description' => 'For small companies starting with AI interviews.',
                 'monthly_amount' => 2900,
@@ -41,7 +41,7 @@ final class PlanSeeder extends Seeder
                 'sort_order' => 1,
             ],
             [
-                'code' => PlanCode::Growth->value,
+                'slug' => PlanCode::Growth->value,
                 'name' => 'Growth',
                 'description' => 'For growing companies that run regular hiring campaigns.',
                 'monthly_amount' => 9900,
@@ -68,7 +68,7 @@ final class PlanSeeder extends Seeder
                 'sort_order' => 2,
             ],
             [
-                'code' => PlanCode::Business->value,
+                'slug' => PlanCode::Business->value,
                 'name' => 'Business',
                 'description' => 'For companies with larger recruitment volume.',
                 'monthly_amount' => 29900,
@@ -95,7 +95,7 @@ final class PlanSeeder extends Seeder
                 'sort_order' => 3,
             ],
             [
-                'code' => PlanCode::Enterprise->value,
+                'slug' => PlanCode::Enterprise->value,
                 'name' => 'Enterprise',
                 'description' => 'Custom limits and custom contract for enterprise companies.',
                 'monthly_amount' => null,
@@ -126,7 +126,7 @@ final class PlanSeeder extends Seeder
 
         foreach ($plans as $plan) {
             Plan::query()->updateOrCreate(
-                ['code' => $plan['code']],
+                ['slug' => $plan['slug']],
                 $plan + ['is_active' => true]
             );
         }
