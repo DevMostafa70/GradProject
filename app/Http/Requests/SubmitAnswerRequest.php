@@ -17,6 +17,9 @@ class SubmitAnswerRequest extends FormRequest
             'question_id' => ['required', 'integer', 'exists:questions,id'],
             'audio_file' => ['required', 'file', 'mimes:webm,mp3,wav,m4a', 'max:102400'],
             'duration_seconds' => ['required', 'integer', 'min:1', 'max:600'],
+
+              // 🔹 NEW: Idempotency key to prevent duplicate submissions
+            'idempotency_key' => ['required', 'string', 'max:64', 'regex:/^[a-zA-Z0-9\-_]+$/'],
         ];
     }
 
@@ -26,6 +29,9 @@ class SubmitAnswerRequest extends FormRequest
             'audio_file.required' => 'Audio recording is required.',
             'audio_file.max' => 'Audio file size must not exceed 100MB.',
             'duration_seconds.max' => 'Answer duration cannot exceed 10 minutes.',
+
+             'idempotency_key.required' => 'Idempotency key is required.',
+            'idempotency_key.regex' => 'Idempotency key must contain only letters, numbers, dashes, and underscores.',
         ];
     }
 }

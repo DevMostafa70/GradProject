@@ -39,6 +39,7 @@ class AntiCheatLog extends Model
     const TYPE_COPY_PASTE_ATTEMPT = 'copy_paste_attempt';
     const TYPE_SCREEN_CAPTURE = 'screen_capture';
 
+    const TYPE_PROMPT_INJECTION_ATTEMPT = 'prompt_injection_attempt';
     public function interview(): BelongsTo
     {
         return $this->belongsTo(Interview::class);

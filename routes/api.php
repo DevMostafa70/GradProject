@@ -27,6 +27,8 @@ use App\Http\Controllers\API\ResumeController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\Company\Billing\CheckoutController;
 use App\Http\Controllers\API\Company\Billing\BillingPortalController;
+use App\Http\Controllers\API\Webhook\StripeWebhookController;
+
 /*
 |--------------------------------------------------------------------------
 | API Routes
@@ -51,6 +53,9 @@ Route::prefix('candidate')->group(function () {
 Route::prefix('company')->group(function () {
     Route::post('/register', [CompanyAuthController::class, 'register'])->middleware('throttle:3,1');
     Route::post('/login', [CompanyAuthController::class, 'login'])->middleware('throttle:auth');
+
+    // ✅ Billing Plans (Public - متاحة للجميع)
+    Route::get('/plans', [PlanController::class, 'index']);
 });
 
 // ===== Admin Auth =====
@@ -66,10 +71,14 @@ Route::prefix('interview/join')->group(function () {
     Route::post('/{token}/complete', [PublicInterviewController::class, 'complete'])->where('token', '.*')->middleware('throttle:10,1');
 });
 
+// ===== Stripe Webhook (No Auth - Public) =====
+Route::post('/stripe/webhook', [StripeWebhookController::class, 'handle'])
+    ->name('stripe.webhook');
+
 // ==================== Protected Routes (Auth Required) ====================
 
 // ===== User Routes (Regular Users) =====
-Route::prefix('user')->middleware(['auth:sanctum', 'throttle:user'])->group(function () {
+Route::prefix('user')->middleware(['auth:sanctum', 'role:user', 'throttle:user'])->group(function () {
     Route::post('/logout', [UserAuthController::class, 'logout']);
     Route::get('/profile', [UserAuthController::class, 'profile']);
     Route::put('/profile', [UserAuthController::class, 'updateProfile']);
@@ -99,81 +108,56 @@ Route::prefix('user')->middleware(['auth:sanctum', 'throttle:user'])->group(func
 
 // ===== Candidate Routes (Legacy - معلقة مؤقتاً) =====
 // Route::prefix('candidate')->middleware('auth:candidate')->group(function () {
-//     Route::post('/logout', [CandidateAuthController::class, 'logout']);
-//     Route::get('/profile', [CandidateAuthController::class, 'profile']);
-
-//     // Dashboard
-//     Route::get('/dashboard', [DashboardController::class, 'index']);
-//     Route::get('/dashboard/stats', [DashboardController::class, 'stats']);
-//     Route::get('/dashboard/progress', [DashboardController::class, 'progress']);
-//     Route::get('/dashboard/weaknesses', [DashboardController::class, 'weaknesses']);
-//     Route::get('/dashboard/daily-questions', [DashboardController::class, 'dailyQuestions']);
-
-//     // Results
-//     Route::get('/results', [ResultsController::class, 'index']);
-//     Route::get('/results/summary', [ResultsController::class, 'summary']);
-//     Route::get('/results/{interview}', [ResultsController::class, 'show']);
-
-//     // Resume
-//     Route::post('/resume/upload', [ResumeController::class, 'upload']);
-//     Route::get('/resume', [ResumeController::class, 'index']);
-//     Route::get('/resume/latest', [ResumeController::class, 'latest']);
-//     Route::get('/resume/{resume}', [ResumeController::class, 'show']);
-//     Route::get('/resume/{resume}/improvements', [ResumeController::class, 'improvements']);
-//     Route::delete('/resume/{resume}', [ResumeController::class, 'destroy']);
+//     ... باقي Routes معلقة ...
 // });
 
-// ===== Company Routes =====
-Route::prefix('company')->middleware(['auth:sanctum', 'throttle:company'])->group(function () {
+// ===== Company Routes (Auth + Role) =====
+Route::prefix('company')->middleware(['auth:sanctum', 'role:company'])->group(function () {
+
+    // ===== Routes لا تحتاج اشتراك فعال =====
     Route::post('/logout', [CompanyAuthController::class, 'logout']);
     Route::get('/profile', [CompanyAuthController::class, 'profile']);
+    Route::post('/profile', [CompanyAuthController::class, 'updateProfile']);
 
-    // Job Management
-    Route::apiResource('jobs', CompanyJobController::class)->only(['index', 'store', 'show']);
-    Route::post('/jobs/{job}/close', [CompanyJobController::class, 'close']);
-    Route::get('/jobs/{job}/stats', [CompanyJobController::class, 'stats']);
-    Route::get('/jobs/{job}/candidates', [CompanyJobController::class, 'candidates']);
-    Route::get('/jobs/{job}/candidates/{candidate}', [CompanyJobController::class, 'candidateDetails']);
-    Route::put('/jobs/{job}/candidates/{candidate}/status', [CompanyJobController::class, 'updateCandidateStatus']);
+    // ===== Billing Routes =====
+    Route::prefix('billing')->group(function () {
+        Route::get('/status', [BillingStatusController::class, 'show'])
+            ->middleware('company.authenticated');
 
-    // Bulk invitations
-    Route::post('/jobs/{job}/invite-bulk', [CompanyJobController::class, 'inviteBulk'])->middleware('throttle:5,10');
-    Route::get('/jobs/{job}/invitation-stats', [CompanyJobController::class, 'invitationStats']);
-    Route::get('/jobs/{job}/invitations', [CompanyJobController::class, 'invitations']);
+        Route::post('/select-plan', [SelectPlanController::class, 'store'])
+            ->middleware(['company.authenticated', 'company.approved']);
 
-    // Question Bank
-    Route::post('/jobs/{job}/upload-questions', [CompanyJobController::class, 'uploadQuestions'])->middleware('throttle:upload');
-    Route::get('/jobs/{job}/question-stats', [CompanyJobController::class, 'questionStats']);
-    Route::get('/jobs/{job}/question-bank', [CompanyJobController::class, 'getQuestionBank']);
+        Route::post('/checkout', [CheckoutController::class, 'store'])
+            ->middleware(['company.authenticated', 'company.approved']);
 
+        Route::post('/portal', [BillingPortalController::class, 'store'])
+            ->middleware(['company.authenticated']);
+    });
 
-     // Billing
-Route::get('/billing/status', [BillingStatusController::class, 'show'])
-    ->middleware('company.authenticated');
+    // ===== Routes تحتاج اشتراك فعال (company.paid) =====
+    Route::middleware(['company.paid'])->group(function () {
+        // Job Management
+        Route::apiResource('jobs', CompanyJobController::class)->only(['index', 'store', 'show']);
+        Route::post('/jobs/{job}/close', [CompanyJobController::class, 'close']);
+        Route::get('/jobs/{job}/stats', [CompanyJobController::class, 'stats']);
+        Route::get('/jobs/{job}/candidates', [CompanyJobController::class, 'candidates']);
+        Route::get('/jobs/{job}/candidates/{candidate}', [CompanyJobController::class, 'candidateDetails']);
+        Route::put('/jobs/{job}/candidates/{candidate}/status', [CompanyJobController::class, 'updateCandidateStatus']);
 
-Route::post('/billing/select-plan', [SelectPlanController::class, 'store'])
-    ->middleware(['company.authenticated', 'company.approved']);
+        // Bulk invitations
+        Route::post('/jobs/{job}/invite-bulk', [CompanyJobController::class, 'inviteBulk']);
+        Route::get('/jobs/{job}/invitation-stats', [CompanyJobController::class, 'invitationStats']);
+        Route::get('/jobs/{job}/invitations', [CompanyJobController::class, 'invitations']);
 
-Route::post('/billing/checkout', [CheckoutController::class, 'store'])
-    ->middleware(['company.authenticated', 'company.approved']);
-
-Route::post('/billing/portal', [BillingPortalController::class, 'store'])
-    ->middleware(['company.authenticated']);
+        // Question Bank
+        Route::post('/jobs/{job}/upload-questions', [CompanyJobController::class, 'uploadQuestions']);
+        Route::get('/jobs/{job}/question-stats', [CompanyJobController::class, 'questionStats']);
+        Route::get('/jobs/{job}/question-bank', [CompanyJobController::class, 'getQuestionBank']);
+    });
 });
-// Billing
-Route::get('/billing/status', [BillingStatusController::class, 'show'])
-    ->middleware('company.authenticated');
 
-Route::post('/billing/select-plan', [SelectPlanController::class, 'store'])
-    ->middleware(['company.authenticated', 'company.approved']);
-
-Route::post('/billing/checkout', [CheckoutController::class, 'store'])
-    ->middleware(['company.authenticated', 'company.approved']);
-
-Route::post('/billing/portal', [BillingPortalController::class, 'store'])
-    ->middleware(['company.authenticated']);
 // ===== Admin Routes =====
-Route::prefix('admin')->middleware(['auth:sanctum', 'throttle:admin'])->group(function () {
+Route::prefix('admin')->middleware(['auth:sanctum', 'role:admin,super_admin', 'throttle:admin'])->group(function () {
     Route::post('/logout', [AdminAuthController::class, 'logout']);
     Route::get('/profile', [AdminAuthController::class, 'profile']);
 
@@ -233,12 +217,26 @@ Route::prefix('admin')->middleware(['auth:sanctum', 'throttle:admin'])->group(fu
 });
 
 // ===== Interview Routes (for regular users - practice) =====
-Route::middleware(['auth:sanctum', 'throttle:interview'])->group(function () {
+Route::middleware(['auth:sanctum', 'role:user', 'throttle:interview'])->group(function () {
     Route::apiResource('interviews', InterviewController::class)->except(['update', 'destroy']);
     Route::post('/interviews/{interview}/complete', [InterviewController::class, 'complete']);
     Route::get('/interviews/{interview}/status', [InterviewController::class, 'checkFinalStatus']);
     Route::get('/interviews/{interview}/report', [InterviewController::class, 'getFinalReport']);
     Route::get('/interviews/{interview}/report-ready', [InterviewController::class, 'checkReportReady']);
+
+    // Session Management Routes
+    Route::get('/interviews/{interview}/session', [InterviewController::class, 'sessionStatus']);
+    Route::get('/interviews/resume/{token}', [InterviewController::class, 'resumeByToken']);
+
+    // Resume Interview Routes
+    Route::get('/interviews/{interview}/resume', [InterviewController::class, 'resume']);
+    Route::get('/interviews/{interview}/can-resume', [InterviewController::class, 'canResume']);
+
+    // Tab Lock Routes
+    Route::get('/interviews/{interview}/lock-status', [InterviewController::class, 'lockStatus']);
+    Route::post('/interviews/{interview}/lock', [InterviewController::class, 'lock']);
+    Route::post('/interviews/{interview}/unlock', [InterviewController::class, 'unlock']);
+    Route::post('/interviews/{interview}/refresh-lock', [InterviewController::class, 'refreshLock']);
 
     // Answers
     Route::post('/answers', [AnswerController::class, 'store'])->middleware('throttle:interview');
@@ -251,18 +249,3 @@ Route::middleware(['auth:sanctum', 'throttle:interview'])->group(function () {
     // Interview Answer AI Analysis
     Route::post('/analyze-answer', [InterviewAnalysisController::class, 'analyze']);
 });
-
-// ===== Company Auth =====
-Route::prefix('company')->group(function () {
-    Route::post('/register', [CompanyAuthController::class, 'register']);
-    Route::post('/login', [CompanyAuthController::class, 'login']);
-});
-// ===== Company Auth =====
-Route::prefix('company')->group(function () {
-    Route::post('/register', [CompanyAuthController::class, 'register']);
-    Route::post('/login', [CompanyAuthController::class, 'login']);
-
-    // Billing Plans
-    Route::get('/plans', [PlanController::class, 'index']);
-});
-

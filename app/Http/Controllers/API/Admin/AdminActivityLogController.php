@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\API\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\ActivityLog;
 use App\Services\ActivityLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -112,17 +113,53 @@ class AdminActivityLogController extends Controller
     }
 
     /**
-     * حذف السجلات القديمة
+     * حذف السجلات (جميعها أو القديمة)
      * DELETE /api/admin/activity-logs/clean
      */
     public function clean(Request $request): JsonResponse
     {
-        $days = $request->get('days', 30);
-        $deleted = $this->activityLogService->cleanOldLogs($days);
+        try {
+            $days = $request->get('days');
 
-        return response()->json([
-            'success' => true,
-            'message' => "Deleted {$deleted} logs older than {$days} days",
-        ]);
+            // ✅ إذا لم يتم تحديد days، احذف جميع السجلات
+            if ($days === null) {
+                $deleted = ActivityLog::query()->delete();
+
+                return response()->json([
+                    'success' => true,
+                    'message' => "Deleted all {$deleted} logs",
+                    'data' => [
+                        'deleted_count' => $deleted,
+                        'mode' => 'all',
+                    ],
+                ]);
+            }
+
+            // ✅ إذا تم تحديد days، احذف السجلات الأقدم من ذلك
+            $days = (int) $days;
+            if ($days < 1) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Invalid days parameter. Must be a positive integer or omit to delete all.',
+                ], 422);
+            }
+
+            $deleted = $this->activityLogService->cleanOldLogs($days);
+
+            return response()->json([
+                'success' => true,
+                'message' => "Deleted {$deleted} logs older than {$days} days",
+                'data' => [
+                    'deleted_count' => $deleted,
+                    'days' => $days,
+                    'mode' => 'older_than',
+                ],
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to clean logs: ' . $e->getMessage(),
+            ], 500);
+        }
     }
 }

@@ -1,0 +1,45 @@
+[33m653a985[m[33m ([m[1;36mHEAD -> [m[1;32mAll-code[m[33m)[m HEAD@{0}: pull origin All-code: Fast-forward
+[33m48047be[m HEAD@{1}: checkout: moving from All-code to All-code
+[33m48047be[m HEAD@{2}: checkout: moving from All-code to All-code
+[33m48047be[m HEAD@{3}: commit: Edit 1
+[33mf88c75b[m[33m ([m[1;32mlast-Dashboard[m[33m)[m HEAD@{4}: checkout: moving from last-Dashboard to All-code
+[33mf88c75b[m[33m ([m[1;32mlast-Dashboard[m[33m)[m HEAD@{5}: checkout: moving from last-Dashboard to last-Dashboard
+[33mf88c75b[m[33m ([m[1;32mlast-Dashboard[m[33m)[m HEAD@{6}: commit (merge): Merge branch 'clean-interview' into last-Dashboard
+[33m26d126e[m[33m ([m[1;31morigin/last-Dashboard[m[33m)[m HEAD@{7}: checkout: moving from clean-interview to last-Dashboard
+[33md3b4b1a[m[33m ([m[1;31morigin/clean-interview[m[33m, [m[1;32mclean-interview[m[33m)[m HEAD@{8}: checkout: moving from last-Dashboard to clean-interview
+[33m26d126e[m[33m ([m[1;31morigin/last-Dashboard[m[33m)[m HEAD@{9}: checkout: moving from last-Dashboard to last-Dashboard
+[33m26d126e[m[33m ([m[1;31morigin/last-Dashboard[m[33m)[m HEAD@{10}: commit: Improvements 1
+[33m4df951a[m HEAD@{11}: commit: Companies-Admin-User
+[33m62e3e3e[m[33m ([m[1;31morigin/full-interview[m[33m, [m[1;32mfull-interview[m[33m)[m HEAD@{12}: checkout: moving from full-interview to last-Dashboard
+[33m62e3e3e[m[33m ([m[1;31morigin/full-interview[m[33m, [m[1;32mfull-interview[m[33m)[m HEAD@{13}: checkout: moving from full-interview to full-interview
+[33m62e3e3e[m[33m ([m[1;31morigin/full-interview[m[33m, [m[1;32mfull-interview[m[33m)[m HEAD@{14}: commit: Edit candidates
+[33m482f2fa[m HEAD@{15}: commit: 6/9/2026
+[33m0441d0b[m HEAD@{16}: commit: 6/8/2026
+[33m1f80e43[m HEAD@{17}: pull origin full-interview: Fast-forward
+[33ma8e18d1[m HEAD@{18}: checkout: moving from full-interview to full-interview
+[33ma8e18d1[m HEAD@{19}: reset: moving to origin/full-interview
+[33m512db16[m HEAD@{20}: checkout: moving from full-interview to full-interview
+[33m512db16[m HEAD@{21}: reset: moving to origin/full-interview
+[33m72c836f[m HEAD@{22}: checkout: moving from full-interview to full-interview
+[33m72c836f[m HEAD@{23}: pull origin full-interview: Fast-forward
+[33m0f71576[m HEAD@{24}: checkout: moving from companies-admin to full-interview
+[33m2b1f39e[m[33m ([m[1;31morigin/companies-admin[m[33m, [m[1;32mcompanies-admin[m[33m, [m[1;32mDashbord[m[33m)[m HEAD@{25}: checkout: moving from Dashbord to companies-admin
+[33m2b1f39e[m[33m ([m[1;31morigin/companies-admin[m[33m, [m[1;32mcompanies-admin[m[33m, [m[1;32mDashbord[m[33m)[m HEAD@{26}: checkout: moving from Dashbord to Dashbord
+[33m2b1f39e[m[33m ([m[1;31morigin/companies-admin[m[33m, [m[1;32mcompanies-admin[m[33m, [m[1;32mDashbord[m[33m)[m HEAD@{27}: checkout: moving from full-interview to Dashbord
+[33m0f71576[m HEAD@{28}: reset: moving to origin/full-interview
+[33m0f71576[m HEAD@{29}: checkout: moving from Dashbord to full-interview
+[33m2b1f39e[m[33m ([m[1;31morigin/companies-admin[m[33m, [m[1;32mcompanies-admin[m[33m, [m[1;32mDashbord[m[33m)[m HEAD@{30}: checkout: moving from Dashbord to Dashbord
+[33m2b1f39e[m[33m ([m[1;31morigin/companies-admin[m[33m, [m[1;32mcompanies-admin[m[33m, [m[1;32mDashbord[m[33m)[m HEAD@{31}: reset: moving to HEAD
+[33m2b1f39e[m[33m ([m[1;31morigin/companies-admin[m[33m, [m[1;32mcompanies-admin[m[33m, [m[1;32mDashbord[m[33m)[m HEAD@{32}: checkout: moving from Dashbord to Dashbord
+[33m2b1f39e[m[33m ([m[1;31morigin/companies-admin[m[33m, [m[1;32mcompanies-admin[m[33m, [m[1;32mDashbord[m[33m)[m HEAD@{33}: checkout: moving from full-interview to Dashbord
+[33m0f71576[m HEAD@{34}: checkout: moving from Dashbord to full-interview
+[33m2b1f39e[m[33m ([m[1;31morigin/companies-admin[m[33m, [m[1;32mcompanies-admin[m[33m, [m[1;32mDashbord[m[33m)[m HEAD@{35}: checkout: moving from full-interview to Dashbord
+[33m0f71576[m HEAD@{36}: reset: moving to HEAD
+[33m0f71576[m HEAD@{37}: checkout: moving from Dashbord to full-interview
+[33m2b1f39e[m[33m ([m[1;31morigin/companies-admin[m[33m, [m[1;32mcompanies-admin[m[33m, [m[1;32mDashbord[m[33m)[m HEAD@{38}: commit: حفظ التعديلات الحالية
+[33mc96692b[m HEAD@{39}: commit: Dashbord add1
+[33m159a3b6[m[33m ([m[1;31morigin/Working-Interview[m[33m, [m[1;32mWorking-Interview[m[33m)[m HEAD@{40}: checkout: moving from Working-Interview to Dashbord
+[33m159a3b6[m[33m ([m[1;31morigin/Working-Interview[m[33m, [m[1;32mWorking-Interview[m[33m)[m HEAD@{41}: checkout: moving from main to Working-Interview
+[33mcfc6215[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/all-code-wirth-payments[m[33m, [m[1;31morigin/TestProject[m[33m, [m[1;31morigin/Last-Interview[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32mmain[m[33m)[m HEAD@{42}: commit: تم تعديل الكود
+[33m680bfd9[m HEAD@{43}: commit: Add API authentication controller and update user model, routes
+[33m7c8d877[m HEAD@{44}: clone: from https://github.com/yahiaMelegil/interview-ai.git

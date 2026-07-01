@@ -21,6 +21,9 @@ class Answer extends Model
         'submitted_at',
         'processed_at',
         'processing_metadata',
+
+        // 🔹 NEW
+        'idempotency_key',
     ];
 
     protected $casts = [
@@ -62,5 +65,47 @@ class Answer extends Model
     public function isEvaluated(): bool
     {
         return $this->status === self::STATUS_EVALUATED;
+    }
+
+
+        // ==================== Duplicate Prevention ====================
+
+    /**
+     * Check if an answer already exists for a question
+     */
+    public static function existsForQuestion(int $interviewId, int $questionId): bool
+    {
+        return self::where('interview_id', $interviewId)
+            ->where('question_id', $questionId)
+            ->exists();
+    }
+
+    /**
+     * Find answer by idempotency key
+     */
+    public static function findByIdempotencyKey(string $key): ?self
+    {
+        return self::where('idempotency_key', $key)->first();
+    }
+
+    /**
+     * Create a new answer with idempotency protection
+     */
+    public static function createWithIdempotency(array $data, string $idempotencyKey): ?self
+    {
+        // Check if answer already exists with this idempotency key
+        $existing = self::findByIdempotencyKey($idempotencyKey);
+        if ($existing) {
+            return $existing;
+        }
+
+        // Check if answer already exists for this question
+        if (self::existsForQuestion($data['interview_id'], $data['question_id'])) {
+            return null;
+        }
+
+        // Create new answer
+        $data['idempotency_key'] = $idempotencyKey;
+        return self::create($data);
     }
 }

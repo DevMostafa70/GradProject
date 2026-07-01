@@ -13,6 +13,7 @@ return Application::configure(basePath: dirname(__DIR__))
         api: __DIR__ . '/../routes/api.php',
         channels: __DIR__ . '/../routes/channels.php',
         commands: __DIR__ . '/../routes/console.php',
+
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware) {
@@ -21,11 +22,13 @@ return Application::configure(basePath: dirname(__DIR__))
             'broadcasting/auth','stripe/*'
         ]);
         $middleware->alias([
-            'role' => \App\Http\Middleware\CheckUserRole::class,
+            'role' => \App\Http\Middleware\CheckRole::class, // ✅ تم التعديل (استخدام CheckRole الجديد)
             'admin' => \App\Http\Middleware\AdminMiddleware::class,
             'throttle' => \Illuminate\Routing\Middleware\ThrottleRequests::class,
             'company.authenticated' => \App\Http\Middleware\EnsureAuthenticatedCompany::class,
             'company.approved' => \App\Http\Middleware\EnsureCompanyApproved::class,
+
+             'company.paid' => \App\Http\Middleware\EnsureCompanyHasPaidAccess::class,
         ]);
 
     })

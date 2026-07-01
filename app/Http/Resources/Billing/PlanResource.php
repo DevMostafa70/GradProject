@@ -13,22 +13,22 @@ final class PlanResource extends JsonResource
     {
         return [
             'id' => $this->id,
-            'code' => $this->code?->value ?? $this->code,
+            'slug' => $this->slug,
             'name' => $this->name,
             'description' => $this->description,
             'pricing' => [
-                'monthly_amount' => $this->monthly_amount,
-                'yearly_amount' => $this->yearly_amount,
-                'currency' => $this->currency,
+                'monthly' => $this->monthly_price,      
+                'yearly' => $this->yearly_price,        
+                'currency' => $this->currency ?? 'usd',
             ],
             'features' => $this->features ?? [],
-            'limits' => $this->limits ?? [],
-            'stripe' => [
-                'product_id' => $this->stripe_product_id,
-                'monthly_price_id' => $this->stripe_price_monthly_id,
-                'yearly_price_id' => $this->stripe_price_yearly_id,
+            'limits' => [
+                'interviews' => $this->interviews_limit,
+                'jobs' => $this->jobs_limit,
+                'candidates' => $this->candidates_limit,
             ],
             'is_active' => (bool) $this->is_active,
+            'is_default' => (bool) $this->is_default,
             'sort_order' => (int) $this->sort_order,
         ];
     }

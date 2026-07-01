@@ -6,7 +6,6 @@ use App\Http\Controllers\Controller;
 use App\Models\Company;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Symfony\Component\HttpFoundation\Response;
 
 class BillingPortalController extends Controller
 {
@@ -15,18 +14,23 @@ class BillingPortalController extends Controller
         /** @var Company $company */
         $company = $request->user();
 
-        if (! $company->stripe_id) {
+        if (!$company->stripe_id) {
             return response()->json([
+                'success' => false,
                 'message' => 'Stripe customer does not exist for this company yet.',
-            ], Response::HTTP_UNPROCESSABLE_ENTITY);
+            ], 422);
         }
 
-        $returnUrl = rtrim((string) config('interview_ai.frontend_url'), '/') . '/company/billing';
+        $frontendUrl = rtrim(config('interview_ai.frontend_url', 'http://localhost:5173'), '/');
+        $returnUrl = $frontendUrl . '/company/billing';
+
+        $portalSession = $company->newBillingPortalSession($returnUrl);
 
         return response()->json([
+            'success' => true,
             'message' => 'Billing portal session created successfully.',
             'data' => [
-                'portal_url' => $company->billingPortalUrl($returnUrl),
+                'portal_url' => $portalSession->url,
             ],
         ]);
     }

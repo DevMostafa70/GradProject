@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Models;
 
-use App\Enums\PlanCode;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -14,30 +13,35 @@ final class Plan extends Model
     use HasFactory;
 
     protected $fillable = [
-        'code',
         'name',
+        'slug',
         'description',
+        'monthly_price',
+        'yearly_price',
+        'currency',
         'stripe_product_id',
         'stripe_price_monthly_id',
         'stripe_price_yearly_id',
-        'monthly_amount',
-        'yearly_amount',
-        'currency',
+        'interviews_limit',
+        'jobs_limit',
+        'candidates_limit',
         'features',
-        'limits',
         'is_active',
+        'is_default',
         'sort_order',
     ];
 
     protected function casts(): array
     {
         return [
-            'code' => PlanCode::class,
-            'monthly_amount' => 'integer',
-            'yearly_amount' => 'integer',
+            'monthly_price' => 'decimal:2',
+            'yearly_price' => 'decimal:2',
+            'interviews_limit' => 'integer',
+            'jobs_limit' => 'integer',
+            'candidates_limit' => 'integer',
             'features' => 'array',
-            'limits' => 'array',
             'is_active' => 'boolean',
+            'is_default' => 'boolean',
             'sort_order' => 'integer',
         ];
     }
@@ -47,15 +51,20 @@ final class Plan extends Model
         return $this->hasMany(Company::class, 'selected_plan_id');
     }
 
-    public function hasFeature(string $feature): bool
+    public function getStripePriceId(string $interval = 'monthly'): ?string
     {
-        return (bool) data_get($this->features, $feature, false);
+        return $interval === 'yearly'
+            ? $this->stripe_price_yearly_id
+            : $this->stripe_price_monthly_id;
     }
 
     public function limit(string $key): ?int
     {
-        $value = data_get($this->limits, $key);
-
-        return is_numeric($value) ? (int) $value : null;
+        return match ($key) {
+            'jobs' => $this->jobs_limit,
+            'candidates' => $this->candidates_limit,
+            'interviews' => $this->interviews_limit,
+            default => null,
+        };
     }
 }

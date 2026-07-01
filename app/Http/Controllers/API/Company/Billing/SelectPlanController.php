@@ -4,34 +4,60 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api\Company\Billing;
 
+use App\Enums\BillingStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Company\Billing\SelectCompanyPlanRequest;
-use App\Http\Resources\Billing\CompanyBillingStatusResource;
-use App\Models\Company;
-use App\Services\Billing\CompanyBillingService;
+use App\Models\Plan;
 use Illuminate\Http\JsonResponse;
-use Symfony\Component\HttpFoundation\Response;
 
 final class SelectPlanController extends Controller
 {
-    public function __construct(
-        private readonly CompanyBillingService $companyBillingService,
-    ) {
-    }
-
     public function store(SelectCompanyPlanRequest $request): JsonResponse
     {
-        /** @var Company $company */
+        /** @var \App\Models\Company $company */
         $company = $request->user();
 
-        $company = $this->companyBillingService->selectPlan(
-            company: $company,
-            planCode: $request->planCode(),
-        );
+        // ✅ التأكد من أن المستخدم شركة
+        if (!$company || !($company instanceof \App\Models\Company)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized. Company access required.',
+            ], 403);
+        }
+
+        // البحث عن الخطة
+        $plan = Plan::where('slug', $request->planCode())
+            ->where('is_active', true)
+            ->first();
+
+        if (!$plan) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid plan selected.',
+            ], 422);
+        }
+
+        // تحديث الشركة بالخطة المختارة
+        $company->update([
+            'selected_plan_id' => $plan->id,
+            'billing_status' => BillingStatus::CheckoutPending,
+        ]);
 
         return response()->json([
-            'message' => 'Plan selected successfully. Checkout will be created in the next billing step.',
-            'data' => new CompanyBillingStatusResource($company),
-        ], Response::HTTP_OK);
+            'success' => true,
+            'message' => 'Plan selected successfully. Please proceed to checkout.',
+            'data' => [
+                'company' => [
+                    'id' => $company->id,
+                    'name' => $company->company_name,
+                ],
+                'selected_plan' => [
+                    'id' => $plan->id,
+                    'name' => $plan->name,
+                    'slug' => $plan->slug,
+                ],
+                'billing_status' => $company->billing_status->value,
+            ],
+        ]);
     }
 }

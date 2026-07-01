@@ -27,6 +27,8 @@ class StoreInterviewRequest extends FormRequest
             'skills' => ['required', 'array', 'min:1'],
             'skills.*' => ['string', 'max:100'],
             'number_of_questions' => ['integer', 'min:3', 'max:10', 'default:5'],
+            // 🔹 NEW: Session duration in minutes (optional)
+            'session_duration' => ['nullable', 'integer', 'min:15', 'max:240'],
         ];
     }
 
@@ -37,6 +39,12 @@ class StoreInterviewRequest extends FormRequest
             'skills.min' => 'Please specify at least one skill for the interview.',
             'number_of_questions.min' => 'Minimum 3 questions required.',
             'number_of_questions.max' => 'Maximum 10 questions allowed.',
+            'session_duration.min' => 'Session duration must be at least 15 minutes.',
+            'session_duration.max' => 'Session duration cannot exceed 240 minutes (4 hours).',
+
+            'session_id' => ['nullable', 'string', 'max:64'],
+            'device_fingerprint' => ['nullable', 'string', 'max:255'],
+
         ];
     }
 }

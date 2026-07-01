@@ -613,7 +613,7 @@ EOT;
     /**
      * Build comprehensive prompt for final report
      */
-   private function buildFinalReportPrompt(
+    private function buildFinalReportPrompt(
         Interview $interview,
         Collection $answers,
         Collection $evaluations,
@@ -659,39 +659,8 @@ EOT;
         }
 
         $answersJson = json_encode($answersData, JSON_PRETTY_PRINT);
-        $skillsRequiredJson = json_encode($answer->question->expected_skills, JSON_PRETTY_PRINT);
-        //         return <<<EOT
-        // Generate a comprehensive final interview report based on the following data:
+        $skillsRequiredJson = json_encode($answers->first()?->question?->expected_skills ?? [], JSON_PRETTY_PRINT);
 
-        // INTERVIEW DETAILS:
-        // Position: {$interview->position}
-        // Experience Level: {$interview->experience_level}
-        // Skills Required: {$answersJson}
-        // Number of Questions: {$interview->number_of_questions}
-
-        // ANSWERS AND EVALUATIONS:
-        // {$answersJson}
-        // {$violationContext}
-
-        // Generate a JSON response with the following structure:
-        // {
-        //     "executive_summary": "Brief 2-3 sentence overview",
-        //     "overall_score": 0-10,
-        //     "adjusted_score": 0-10 (after cheating penalty),
-        //     "technical_score": 0-10,
-        //     "communication_score": 0-10,
-        //     "problem_solving_score": 0-10,
-        //     "strengths_analysis": "Detailed analysis of strengths",
-        //     "improvement_areas": "Specific areas for improvement",
-        //     "skill_breakdown": {
-        //         "skill_name": score (0-10)
-        //     },
-        //     "question_evaluations_summary": "Overall performance across questions",
-        //     "hiring_recommendation": "One of: 'Strongly Recommend', 'Recommend', 'Consider', 'Do Not Recommend' with reasoning"
-        // }
-
-        // Ensure all scores reflect the cheating severity score if violations were detected. The adjusted_score should be lower than overall_score if cheating was detected.
-        // EOT;
         return <<<EOT
 Generate a comprehensive final interview report based ONLY on the provided interview data.
 
@@ -728,7 +697,59 @@ Use exactly this JSON structure:
         "skill_name": 0
     },
     "question_evaluations_summary": "Overall performance across questions",
-    "hiring_recommendation": "One of: Strongly Recommend, Recommend, Consider, Do Not Recommend, with reasoning"
+    "hiring_recommendation": "One of: Strongly Recommend, Recommend, Consider, Do Not Recommend, with reasoning",
+
+    "educational_summary": "2-3 sentence educational summary of the candidate's performance, focusing on learning outcomes and what was learned from this interview",
+
+    "key_strengths": [
+        {
+            "area": "The area of strength (e.g., Analytical Thinking)",
+            "example": "A specific example from the answer that demonstrates this strength",
+            "explanation": "Brief explanation of why this is a strength"
+        }
+    ],
+
+    "key_weaknesses": [
+        {
+            "area": "The area of weakness (e.g., Answer Structure)",
+            "example": "A specific example from the answer that demonstrates this weakness",
+            "explanation": "Brief explanation of why this is a weakness"
+        }
+    ],
+
+    "improvement_plan": [
+        {
+            "step": 1,
+            "title": "Step title",
+            "description": "Detailed description of the step",
+            "action_items": [
+                "Specific action item 1",
+                "Specific action item 2"
+            ],
+            "estimated_time": "Estimated time (e.g., 2 weeks)"
+        }
+    ],
+
+    "learning_resources": [
+        {
+            "topic": "Topic name",
+            "resource_type": "course, article, book, video, practice",
+            "title": "Resource title",
+            "description": "Brief description of the resource",
+            "why_recommended": "Why this resource is useful"
+        }
+    ],
+
+    "key_takeaways": [
+        "Key lesson 1",
+        "Key lesson 2",
+        "Key lesson 3"
+    ],
+
+    "next_steps": [
+        "Actionable next step 1",
+        "Actionable next step 2"
+    ]
 }
 
 Critical report generation rules:
@@ -761,7 +782,46 @@ Critical report generation rules:
     "improvement_areas": "The candidate needs to provide clear, complete, and relevant answers to interview questions before their technical, communication, and problem-solving abilities can be evaluated.",
     "skill_breakdown": {},
     "question_evaluations_summary": "All questions were unanswered or lacked meaningful content.",
-    "hiring_recommendation": "Do Not Recommend: The candidate did not provide sufficient meaningful responses to evaluate their suitability for the position."
+    "hiring_recommendation": "Do Not Recommend: The candidate did not provide sufficient meaningful responses to evaluate their suitability for the position.",
+    "educational_summary": "The candidate did not provide meaningful answers during the interview. There is insufficient data to evaluate their performance or provide educational feedback.",
+    "key_strengths": [],
+    "key_weaknesses": [
+        {
+            "area": "Lack of meaningful responses",
+            "example": "The candidate did not provide meaningful answers to the questions asked",
+            "explanation": "Without actual answers, skills cannot be assessed or useful feedback provided"
+        }
+    ],
+    "improvement_plan": [
+        {
+            "step": 1,
+            "title": "Practice answering interview questions",
+            "description": "Practice answering common interview questions in your field",
+            "action_items": [
+                "Research common questions in your field",
+                "Write out your answers in advance",
+                "Practice saying them out loud"
+            ],
+            "estimated_time": "2 weeks"
+        }
+    ],
+    "learning_resources": [
+        {
+            "topic": "Interview Skills",
+            "resource_type": "practice",
+            "title": "Mock Interview Practice",
+            "description": "Conduct mock interviews with friends or use the platform",
+            "why_recommended": "Consistent practice improves confidence and performance"
+        }
+    ],
+    "key_takeaways": [
+        "Proper interview preparation significantly improves performance",
+        "Providing clear and complete answers demonstrates your understanding"
+    ],
+    "next_steps": [
+        "Start practicing with basic interview questions in your field",
+        "Use the Nervu.Ai platform to practice more interviews"
+    ]
 }
 9. overall_score must be calculated from the actual individual question scores, not from general impressions.
 10. adjusted_score must equal overall_score if no cheating or violation was detected.
@@ -784,7 +844,20 @@ Critical report generation rules:
    - Do Not Recommend: adjusted_score < 5, or most answers are unanswered, or serious cheating was detected
 24. All numeric scores must be valid numbers between 0 and 10.
 25. Do not use strings for numeric scores.
-26. Return valid JSON only.
+
+Educational feedback rules:
+26. educational_summary MUST be in English and educational in nature.
+27. key_strengths and key_weaknesses MUST be based on actual answers (not generic).
+28. Each strength/weakness MUST include a real example from the answer.
+29. improvement_plan MUST have 3-5 actionable steps with clear action items.
+30. learning_resources MUST include 3-5 specific resources (real courses, books, etc.).
+31. key_takeaways MUST be 3-5 specific lessons the candidate should learn.
+32. next_steps MUST be 2-3 immediate actionable steps.
+33. All educational content MUST be constructive and encouraging.
+34. Use the actual answer content to personalize feedback.
+35. If cheating was detected, include a note about integrity in educational_summary.
+
+Return valid JSON only.
 EOT;
     }
 

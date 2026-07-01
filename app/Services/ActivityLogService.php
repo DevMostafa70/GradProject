@@ -29,7 +29,6 @@ class ActivityLogService
                 'details' => $details,
             ]);
 
-            // تسجيل في Log النظام أيضاً
             Log::channel('activity')->info("{$section} - {$action}", [
                 'user_id' => auth('admin')->id(),
                 'status' => $status,
@@ -43,33 +42,21 @@ class ActivityLogService
         }
     }
 
-    /**
-     * تسجيل نجاح
-     */
     public function success(string $section, string $action, string $description, ?array $details = []): ActivityLog
     {
         return $this->log($section, $action, $description, 'success', $details);
     }
 
-    /**
-     * تسجيل فشل
-     */
     public function failed(string $section, string $action, string $description, ?array $details = []): ActivityLog
     {
         return $this->log($section, $action, $description, 'failed', $details);
     }
 
-    /**
-     * تسجيل تحذير
-     */
     public function warning(string $section, string $action, string $description, ?array $details = []): ActivityLog
     {
         return $this->log($section, $action, $description, 'warning', $details);
     }
 
-    /**
-     * جلب جميع السجلات مع فلترة
-     */
     public function getLogs(?string $section = null, ?string $status = null, ?string $dateFrom = null, ?string $dateTo = null, int $perPage = 20)
     {
         $query = ActivityLog::with('user')
@@ -94,17 +81,11 @@ class ActivityLogService
         return $query->paginate($perPage);
     }
 
-    /**
-     * جلب سجل محدد مع التفاصيل
-     */
     public function getLogDetails(int $id): ?ActivityLog
     {
         return ActivityLog::with('user')->find($id);
     }
 
-    /**
-     * جلب إحصائيات سريعة للسجلات
-     */
     public function getStats(): array
     {
         return [
@@ -122,11 +103,23 @@ class ActivityLogService
         ];
     }
 
-    /**
-     * حذف السجلات القديمة (أكثر من 30 يوماً)
-     */
     public function cleanOldLogs(int $days = 30): int
     {
-        return ActivityLog::where('created_at', '<', now()->subDays($days))->delete();
+        try {
+            $cutoffDate = now()->subDays($days);
+
+            $deleted = ActivityLog::where('created_at', '<', $cutoffDate)->delete();
+
+            Log::info('Cleaned old activity logs', [
+                'deleted_count' => $deleted,
+                'days' => $days,
+                'cutoff_date' => $cutoffDate->toDateTimeString(),
+            ]);
+
+            return $deleted;
+        } catch (\Exception $e) {
+            Log::error('Failed to clean activity logs: ' . $e->getMessage());
+            return 0;
+        }
     }
 }
