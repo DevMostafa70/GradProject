@@ -135,7 +135,7 @@ class ProcessSingleAnswerJob implements ShouldQueue
             );
 
             // ============================================================
-            // 🔹 NEW: Step 3.5 - Prompt Injection Protection
+            // 🔹 Prompt Injection Protection
             // ============================================================
             $transcript = $this->answer->transcription ?? '';
             $safeTranscript = $transcript;
@@ -211,7 +211,7 @@ class ProcessSingleAnswerJob implements ShouldQueue
                 'ai_raw_response' => $evaluation['raw_response'],
             ]);
 
-            // 🔹 NEW: If we used sanitized transcript, update the answer
+            // 🔹 If we used sanitized transcript, update the answer
             if ($safeTranscript !== $transcript && !$useFallbackEvaluation) {
                 $this->answer->update([
                     'transcription' => $safeTranscript,
@@ -240,14 +240,34 @@ class ProcessSingleAnswerJob implements ShouldQueue
             // Step 7: Check if interview is complete
             $this->checkInterviewCompletion();
 
-            // Clean up audio file
-            Storage::delete($this->audioFilePath);
+            // ============================================================
+            // 🔹 NEW: Clean up audio file with privacy logging
+            // ============================================================
+            if (Storage::delete($this->audioFilePath)) {
+                // 🔹 NEW: Record deletion timestamp for privacy
+                $this->answer->update([
+                    'audio_deleted_at' => now(),
+                ]);
+
+                Log::info('Audio file deleted after processing (privacy)', [
+                    'answer_id' => $this->answer->id,
+                    'interview_id' => $this->answer->interview_id,
+                    'file_path' => $this->audioFilePath,
+                ]);
+            } else {
+                Log::warning('Audio file could not be deleted (may not exist)', [
+                    'answer_id' => $this->answer->id,
+                    'interview_id' => $this->answer->interview_id,
+                    'file_path' => $this->audioFilePath,
+                ]);
+            }
 
             Log::info('Answer processed successfully with real transcription', [
                 'answer_id' => $this->answer->id,
                 'score' => $evaluation['score'],
                 'transcription_length' => strlen($this->answer->transcription),
                 'prompt_injection_handled' => $useFallbackEvaluation,
+                'audio_deleted_at' => $this->answer->audio_deleted_at,
             ]);
 
         } catch (\Exception $e) {
@@ -448,7 +468,7 @@ EOT;
     }
 
     /**
-     * 🔹 NEW: Create fallback evaluation for prompt injection
+     * 🔹 Create fallback evaluation for prompt injection
      */
     private function createFallbackEvaluation(array $fallbackEvaluation): array
     {
@@ -480,7 +500,7 @@ EOT;
     }
 
     /**
-     * 🔹 NEW: Log prompt injection attempt
+     * 🔹 Log prompt injection attempt
      */
     private function logPromptInjection(Interview $interview, array $detection): void
     {
@@ -506,7 +526,6 @@ EOT;
                 'answer_id' => $this->answer->id,
                 'risk_level' => $detection['risk_level'] ?? 'unknown',
             ]);
-
         } catch (\Exception $e) {
             Log::error('Failed to log prompt injection', [
                 'interview_id' => $interview->id,
@@ -525,7 +544,10 @@ EOT;
         if (
             $interview &&
             $interview->hasAllAnswersProcessed() &&
-            $interview->status === Interview::STATUS_COMPLETED
+            $interview->status === Interview::STATUS_COMPLETED &&
+            // 🔹 Don't dispatch if report already exists or generation is in progress
+            !$interview->isReportGenerated() &&
+            !$interview->isReportGenerationInProgress()
         ) {
             $interview->update([
                 'status' => Interview::STATUS_PROCESSING_FINAL,

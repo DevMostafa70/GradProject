@@ -37,6 +37,10 @@ class Interview extends Model
         'active_session_id',
         'session_initialized_at',
         'device_fingerprint',
+
+        'report_generation_started_at',
+        'report_generation_completed_at',
+        'report_generation_attempts',
     ];
 
     protected $casts = [
@@ -50,6 +54,10 @@ class Interview extends Model
         'answered_questions_count' => 'integer',
 
         'session_initialized_at' => 'datetime',
+
+        'report_generation_started_at' => 'datetime',
+        'report_generation_completed_at' => 'datetime',
+        'report_generation_attempts' => 'integer',
 
     ];
 
@@ -511,65 +519,154 @@ class Interview extends Model
 
 // ==================== Cheating Risk Level ====================
 
-/**
- * Get the cheating risk level based on severity score
- */
-public function getCheatingRiskLevel(): CheatingRiskLevel
-{
-    $score = $this->calculateCheatingSeverityScore();
-    return CheatingRiskLevel::fromScore($score);
-}
+    /**
+     * Get the cheating risk level based on severity score
+     */
+    public function getCheatingRiskLevel(): CheatingRiskLevel
+    {
+        $score = $this->calculateCheatingSeverityScore();
+        return CheatingRiskLevel::fromScore($score);
+    }
 
-/**
- * Get the cheating risk level label
- */
-public function getCheatingRiskLevelLabel(): string
-{
-    return $this->getCheatingRiskLevel()->label();
-}
+    /**
+     * Get the cheating risk level label
+     */
+    public function getCheatingRiskLevelLabel(): string
+    {
+        return $this->getCheatingRiskLevel()->label();
+    }
 
-/**
- * Get the cheating risk level color
- */
-public function getCheatingRiskLevelColor(): string
-{
-    return $this->getCheatingRiskLevel()->color();
-}
+    /**
+     * Get the cheating risk level color
+     */
+    public function getCheatingRiskLevelColor(): string
+    {
+        return $this->getCheatingRiskLevel()->color();
+    }
 
-/**
- * Get the cheating risk level description
- */
-public function getCheatingRiskLevelDescription(): string
-{
-    return $this->getCheatingRiskLevel()->description();
-}
+    /**
+     * Get the cheating risk level description
+     */
+    public function getCheatingRiskLevelDescription(): string
+    {
+        return $this->getCheatingRiskLevel()->description();
+    }
 
-/**
- * Get the cheating risk level recommendation
- */
-public function getCheatingRiskLevelRecommendation(): string
-{
-    return $this->getCheatingRiskLevel()->recommendation();
-}
+    /**
+     * Get the cheating risk level recommendation
+     */
+    public function getCheatingRiskLevelRecommendation(): string
+    {
+        return $this->getCheatingRiskLevel()->recommendation();
+    }
 
-/**
- * Get cheating risk data as array
- */
-public function getCheatingRiskData(): array
-{
-    $riskLevel = $this->getCheatingRiskLevel();
-    $violationSummary = $this->getViolationSummary();
+    /**
+     * Get cheating risk data as array
+     */
+    public function getCheatingRiskData(): array
+    {
+        $riskLevel = $this->getCheatingRiskLevel();
+        $violationSummary = $this->getViolationSummary();
 
-    return [
-        'severity_score' => $this->calculateCheatingSeverityScore(),
-        'risk_level' => $riskLevel->value,
-        'risk_label' => $riskLevel->label(),
-        'risk_color' => $riskLevel->color(),
-        'risk_description' => $riskLevel->description(),
-        'recommendation' => $riskLevel->recommendation(),
-        'penalty_multiplier' => $riskLevel->penaltyMultiplier(),
-        'total_violations' => $violationSummary['total_violations'],
-        'violations_by_type' => $violationSummary['by_type'] ?? [],
-    ];
-}
+        return [
+            'severity_score' => $this->calculateCheatingSeverityScore(),
+            'risk_level' => $riskLevel->value,
+            'risk_label' => $riskLevel->label(),
+            'risk_color' => $riskLevel->color(),
+            'risk_description' => $riskLevel->description(),
+            'recommendation' => $riskLevel->recommendation(),
+            'penalty_multiplier' => $riskLevel->penaltyMultiplier(),
+            'total_violations' => $violationSummary['total_violations'],
+            'violations_by_type' => $violationSummary['by_type'] ?? [],
+        ];
+    }
+
+
+        // ==================== Report Generation Lock ====================
+
+    /**
+     * Check if report generation is already in progress
+     */
+    public function isReportGenerationInProgress(): bool
+    {
+        return $this->report_generation_started_at !== null
+            && $this->report_generation_completed_at === null;
+    }
+
+    /**
+     * Check if report is already generated
+     */
+    public function isReportGenerated(): bool
+    {
+        return $this->report_generation_completed_at !== null
+            || $this->finalReport()->exists();
+    }
+
+    /**
+     * Start report generation (acquire lock)
+     * Returns true if lock was acquired, false if already locked
+     */
+    public function acquireReportLock(): bool
+    {
+        // If report already exists, no need to lock
+        if ($this->isReportGenerated()) {
+            return false;
+        }
+
+        // If generation is already in progress, don't acquire again
+        if ($this->isReportGenerationInProgress()) {
+            // Check if the lock is stale (more than 5 minutes)
+            if ($this->report_generation_started_at &&
+                now()->diffInMinutes($this->report_generation_started_at) > 5) {
+                // Stale lock - reset and reacquire
+                $this->report_generation_started_at = null;
+                $this->report_generation_attempts = 0;
+                $this->save();
+            } else {
+                return false;
+            }
+        }
+
+        // Acquire lock
+        $this->report_generation_started_at = now();
+        $this->report_generation_attempts = ($this->report_generation_attempts ?? 0) + 1;
+        $this->save();
+
+        return true;
+    }
+
+    /**
+     * Release report lock (mark as completed)
+     */
+    public function releaseReportLock(): void
+    {
+        $this->report_generation_completed_at = now();
+        $this->save();
+    }
+
+    /**
+     * Reset report lock (for failed generation)
+     */
+    public function resetReportLock(): void
+    {
+        $this->report_generation_started_at = null;
+        $this->report_generation_completed_at = null;
+        // Keep attempts count for logging
+        $this->save();
+    }
+
+    /**
+     * Get report generation status
+     */
+    public function getReportGenerationStatus(): array
+    {
+        return [
+            'is_generated' => $this->isReportGenerated(),
+            'is_in_progress' => $this->isReportGenerationInProgress(),
+            'started_at' => $this->report_generation_started_at?->toISOString(),
+            'completed_at' => $this->report_generation_completed_at?->toISOString(),
+            'attempts' => $this->report_generation_attempts ?? 0,
+            'has_final_report' => $this->finalReport()->exists(),
+        ];
+    }
 }

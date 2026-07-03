@@ -35,7 +35,10 @@ class AppServiceProvider extends ServiceProvider
             WebhookReceived::class,
             HandleStripeWebhookReceived::class
         );
-        // ==================== Rate Limiting ====================
+
+        // ============================================================
+        // 🔹 Rate Limiting
+        // ============================================================
 
         // للمصادقة (تسجيل الدخول)
         RateLimiter::for('auth', function (Request $request) {
@@ -67,9 +70,63 @@ class AppServiceProvider extends ServiceProvider
             return Limit::perMinute(10)->by($request->user()?->id ?: $request->ip());
         });
 
-        // للمقابلات
-        RateLimiter::for('interview', function (Request $request) {
+        // ============================================================
+        // 🔹 NEW: Interview-specific Rate Limiters
+        // ============================================================
+
+        // بدء مقابلة جديدة: 5 طلبات في الساعة
+        RateLimiter::for('start-interview', function (Request $request) {
+            return Limit::perHour(5)->by($request->user()?->id ?: $request->ip());
+        });
+
+        // إرسال إجابة: 10 طلبات في الساعة
+        RateLimiter::for('submit-answer', function (Request $request) {
+            return Limit::perHour(10)->by($request->user()?->id ?: $request->ip());
+        });
+
+        // فحص التقرير: 30 طلب في الدقيقة
+        RateLimiter::for('check-report', function (Request $request) {
+            return Limit::perMinute(30)->by($request->user()?->id ?: $request->ip());
+        });
+
+        // تسجيل مخالفات الغش: 20 طلب في الدقيقة
+        RateLimiter::for('anti-cheat', function (Request $request) {
             return Limit::perMinute(20)->by($request->user()?->id ?: $request->ip());
+        });
+
+        // استئناف المقابلة: 10 طلبات في الساعة
+        RateLimiter::for('resume-interview', function (Request $request) {
+            return Limit::perHour(10)->by($request->user()?->id ?: $request->ip());
+        });
+
+        // التحقق من الجلسة: 60 طلب في الدقيقة
+        RateLimiter::for('session-status', function (Request $request) {
+            return Limit::perMinute(60)->by($request->user()?->id ?: $request->ip());
+        });
+
+        // إنهاء المقابلة: 5 طلبات في الساعة
+        RateLimiter::for('complete-interview', function (Request $request) {
+            return Limit::perHour(5)->by($request->user()?->id ?: $request->ip());
+        });
+
+        // الحصول على التقرير النهائي: 10 طلبات في الدقيقة
+        RateLimiter::for('get-report', function (Request $request) {
+            return Limit::perMinute(10)->by($request->user()?->id ?: $request->ip());
+        });
+
+        // قفل/فتح المقابلة: 20 طلب في الدقيقة
+        RateLimiter::for('interview-lock', function (Request $request) {
+            return Limit::perMinute(20)->by($request->user()?->id ?: $request->ip());
+        });
+
+        // تحديث القفل (Keep Alive): 60 طلب في الدقيقة (مسموح أكثر)
+        RateLimiter::for('refresh-lock', function (Request $request) {
+            return Limit::perMinute(60)->by($request->user()?->id ?: $request->ip());
+        });
+
+        // المقابلات العامة (للمرشحين): 30 طلب في الدقيقة
+        RateLimiter::for('public-interview', function (Request $request) {
+            return Limit::perMinute(30)->by($request->ip());
         });
     }
 }

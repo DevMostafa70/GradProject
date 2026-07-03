@@ -18,6 +18,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 
+
 class AdminService
 {
     /**
@@ -232,79 +233,80 @@ class AdminService
         return $company->delete();
     }
 
-    /**
-     * Send broadcast notification to users
-     */
-    public function sendBroadcastNotification(string $title, string $message, string $targetType, bool $sendEmail = false): array
-    {
-        try {
-            $query = User::query();
+/**
+ * Send broadcast notification to users
+ */
+public function sendBroadcastNotification(string $title, string $message, string $targetType, bool $sendEmail = false): array
+{
+    try {
+        $users = collect();
+        $sentCount = 0;
 
-            switch ($targetType) {
-                case 'companies':
-                    $query->where('role', 'company')->where('is_active', true);
-                    break;
-                case 'candidates':
-                    $query->where('role', 'candidate')->where('is_active', true);
-                    break;
-                default:
-                    $query->whereIn('role', ['candidate', 'company'])->where('is_active', true);
-                    break;
-            }
-
-            $users = $query->get();
-            $sentCount = 0;
-
-            foreach ($users as $user) {
-                DatabaseNotification::create([
-                    'id' => (string) Str::uuid(),
-                    'type' => 'broadcast',
-                    'notifiable_type' => get_class($user),
-                    'notifiable_id' => $user->id,
-                    'data' => json_encode([
-                        'title' => $title,
-                        'message' => $message,
-                        'sender' => 'admin',
-                        'sender_name' => auth()->user()->name ?? 'Admin',
-                    ]),
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-
-                $sentCount++;
-            }
-
-            // Log the broadcast
-            $broadcast = BroadcastNotification::create([
-                'admin_id' => auth()->id(),
-                'title' => $title,
-                'message' => $message,
-                'target_type' => $targetType,
-                'sent_via_email' => $sendEmail,
-                'sent_at' => now(),
-                'sent_count' => $sentCount,
-            ]);
-
-            AdminLog::log('send_broadcast', 'broadcast', $broadcast->id, [
-                'title' => $title,
-                'target_type' => $targetType,
-                'sent_count' => $sentCount,
-            ]);
-
-            return [
-                'sent_count' => $sentCount,
-                'broadcast_id' => $broadcast->id,
-            ];
-        } catch (\Exception $e) {
-            Log::error('sendBroadcastNotification failed: ' . $e->getMessage());
-
-            return [
-                'sent_count' => 0,
-                'broadcast_id' => null,
-                'error' => $e->getMessage(),
-            ];
+        switch ($targetType) {
+            case 'companies':
+                // ✅ جلب الشركات من جدول companies
+                $companies = Company::where('status', 'approved')->get();
+                $users = $companies;
+                break;
+            case 'candidates':
+                // ✅ جلب المرشحين من جدول users (role = candidate)
+                $users = User::where('role', 'candidate')->where('is_active', true)->get();
+                break;
+            case 'users':
+                // ✅ جلب المستخدمين العاديين من جدول users (role = user)
+                $users = User::where('role', 'user')->where('is_active', true)->get();
+                break;
+            default: // 'all'
+                // ✅ جلب الجميع: شركات + مرشحين + مستخدمين
+                $companies = Company::where('status', 'approved')->get();
+                $candidates = User::where('role', 'candidate')->where('is_active', true)->get();
+                $users = User::where('role', 'user')->where('is_active', true)->get();
+                $users = $companies->concat($candidates)->concat($users);
+                break;
         }
+
+        Log::info('Sending broadcast to ' . $users->count() . ' users');
+
+        foreach ($users as $user) {
+            try {
+                $user->notify(new \App\Notifications\BroadcastNotification($title, $message));
+                $sentCount++;
+            } catch (\Exception $e) {
+                Log::error('Failed to notify user ' . ($user->id ?? 'unknown') . ': ' . $e->getMessage());
+            }
+        }
+
+        // ✅ تخزين الإشعار في جدول broadcast_notifications
+        $broadcast = BroadcastNotification::create([
+            'admin_id' => auth()->id(),
+            'title' => $title,
+            'message' => $message,
+            'target_type' => $targetType,
+            'sent_via_email' => $sendEmail,
+            'sent_at' => now(),
+            'sent_count' => $sentCount,
+        ]);
+
+        AdminLog::log('send_broadcast', 'broadcast', $broadcast->id, [
+            'title' => $title,
+            'target_type' => $targetType,
+            'sent_count' => $sentCount,
+        ]);
+
+        return [
+            'sent_count' => $sentCount,
+            'broadcast_id' => $broadcast->id,
+        ];
+    } catch (\Exception $e) {
+        Log::error('sendBroadcastNotification failed: ' . $e->getMessage());
+
+        return [
+            'sent_count' => 0,
+            'broadcast_id' => null,
+            'error' => $e->getMessage(),
+        ];
     }
+}
 
     /**
      * Get all skills with pagination
@@ -444,4 +446,27 @@ class AdminService
 
         return $admin;
     }
+
+
+    /**
+ * الحصول على نوع الـ Notifiable الصحيح
+ */
+private function getNotifiableType($user): string
+{
+    // ✅ تحديد النوع الصحيح
+    if ($user instanceof \App\Models\Company) {
+        return 'App\Models\Company';
+    }
+
+    if ($user instanceof \App\Models\User) {
+        return 'App\Models\User';
+    }
+
+    if ($user instanceof \App\Models\Admin) {
+        return 'App\Models\Admin';
+    }
+
+    // Fallback: استخدم get_class
+    return get_class($user);
+}
 }

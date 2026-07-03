@@ -47,6 +47,16 @@ return [
             'report' => false,
         ],
 
+        // 🔹 NEW: Audio storage disk (separate from public for better organization)
+        'audio' => [
+            'driver' => 'local',
+            'root' => storage_path('app/audio'),
+            'url' => rtrim(env('APP_URL', 'http://localhost'), '/').'/storage/audio',
+            'visibility' => 'private', // Audio files are private by default
+            'throw' => false,
+            'report' => false,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),
@@ -75,6 +85,8 @@ return [
 
     'links' => [
         public_path('storage') => storage_path('app/public'),
+        // 🔹 NEW: Audio storage symbolic link (optional)
+        public_path('storage/audio') => storage_path('app/audio'),
     ],
 
 ];

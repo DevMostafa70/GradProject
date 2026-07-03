@@ -24,6 +24,9 @@ class Answer extends Model
 
         // 🔹 NEW
         'idempotency_key',
+
+        // 🔹 NEW
+        'audio_deleted_at'
     ];
 
     protected $casts = [
@@ -107,5 +110,162 @@ class Answer extends Model
         // Create new answer
         $data['idempotency_key'] = $idempotencyKey;
         return self::create($data);
+    }
+
+
+        // ==================== Audio Privacy ====================
+
+    /**
+     * Check if audio file exists in storage
+     */
+    public function audioFileExists(): bool
+    {
+        if (empty($this->audio_file_path)) {
+            return false;
+        }
+
+        return \Illuminate\Support\Facades\Storage::disk(
+            config('interview_ai.audio.storage_disk', 'public')
+        )->exists($this->audio_file_path);
+    }
+
+    /**
+     * Check if audio file has been deleted
+     */
+    public function isAudioDeleted(): bool
+    {
+        return $this->audio_deleted_at !== null;
+    }
+
+    /**
+     * Delete the audio file from storage
+     */
+    public function deleteAudioFile(): bool
+    {
+        if (empty($this->audio_file_path)) {
+            return false;
+        }
+
+        $disk = config('interview_ai.audio.storage_disk', 'public');
+
+        if (\Illuminate\Support\Facades\Storage::disk($disk)->exists($this->audio_file_path)) {
+            \Illuminate\Support\Facades\Storage::disk($disk)->delete($this->audio_file_path);
+
+            $this->audio_deleted_at = now();
+            $this->save();
+
+            \Illuminate\Support\Facades\Log::info('Audio file deleted for privacy', [
+                'answer_id' => $this->id,
+                'interview_id' => $this->interview_id,
+                'file_path' => $this->audio_file_path,
+            ]);
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Get the audio file path with full storage URL
+     */
+    public function getAudioUrlAttribute(): ?string
+    {
+        if (empty($this->audio_file_path) || $this->isAudioDeleted()) {
+            return null;
+        }
+
+        return \Illuminate\Support\Facades\Storage::disk(
+            config('interview_ai.audio.storage_disk', 'public')
+        )->url($this->audio_file_path);
+    }
+
+    /**
+     * Check if audio is still available (not deleted and file exists)
+     */
+    public function isAudioAvailable(): bool
+    {
+        return !$this->isAudioDeleted() && $this->audioFileExists();
+    }
+
+    /**
+     * Get retention days from config
+     */
+    public static function getRetentionDays(): ?int
+    {
+        $days = config('interview_ai.audio.retention_days');
+        return $days !== null ? (int) $days : null;
+    }
+
+    /**
+     * Scope for answers with audio files that should be deleted
+     */
+    public function scopeShouldDeleteAudio($query)
+    {
+        $retentionDays = self::getRetentionDays();
+
+        if ($retentionDays === null) {
+            return $query->whereRaw('1 = 0'); // No deletion if retention is disabled
+        }
+
+        if ($retentionDays === 0) {
+            // Delete immediately after processing
+            return $query->where('status', self::STATUS_EVALUATED)
+                ->whereNull('audio_deleted_at')
+                ->whereNotNull('audio_file_path');
+        }
+
+        // Delete after retention period
+        return $query->where('status', self::STATUS_EVALUATED)
+            ->whereNull('audio_deleted_at')
+            ->whereNotNull('audio_file_path')
+            ->where('processed_at', '<=', now()->subDays($retentionDays));
+    }
+
+    /**
+     * Get answers with audio files that are eligible for deletion
+     */
+    public static function getAnswersForAudioCleanup(): \Illuminate\Database\Eloquent\Collection
+    {
+        return self::shouldDeleteAudio()->get();
+    }
+
+    /**
+     * Clean up audio files for all eligible answers
+     */
+    public static function cleanupAudioFiles(): array
+    {
+        $answers = self::getAnswersForAudioCleanup();
+        $deletedCount = 0;
+        $failedCount = 0;
+        $errors = [];
+
+        foreach ($answers as $answer) {
+            try {
+                if ($answer->deleteAudioFile()) {
+                    $deletedCount++;
+                } else {
+                    $failedCount++;
+                }
+            } catch (\Exception $e) {
+                $failedCount++;
+                $errors[] = [
+                    'answer_id' => $answer->id,
+                    'error' => $e->getMessage(),
+                ];
+            }
+        }
+
+        \Illuminate\Support\Facades\Log::info('Audio cleanup completed', [
+            'deleted' => $deletedCount,
+            'failed' => $failedCount,
+            'errors' => $errors,
+        ]);
+
+        return [
+            'deleted' => $deletedCount,
+            'failed' => $failedCount,
+            'errors' => $errors,
+        ];
     }
 }

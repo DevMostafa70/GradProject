@@ -66,9 +66,9 @@ Route::prefix('admin')->group(function () {
 // ===== Public interview routes (candidates using job link - no login required) =====
 Route::prefix('interview/join')->group(function () {
     Route::get('/{token}', [PublicInterviewController::class, 'showJob'])->where('token', '.*')->middleware('throttle:60,1');
-    Route::post('/{token}/start', [PublicInterviewController::class, 'start'])->where('token', '.*')->middleware('throttle:10,1');
-    Route::post('/{token}/answer', [PublicInterviewController::class, 'submitAnswer'])->where('token', '.*')->middleware('throttle:interview');
-    Route::post('/{token}/complete', [PublicInterviewController::class, 'complete'])->where('token', '.*')->middleware('throttle:10,1');
+    Route::post('/{token}/start', [PublicInterviewController::class, 'start'])->where('token', '.*')->middleware('throttle:public-interview');
+    Route::post('/{token}/answer', [PublicInterviewController::class, 'submitAnswer'])->where('token', '.*')->middleware('throttle:public-interview');
+    Route::post('/{token}/complete', [PublicInterviewController::class, 'complete'])->where('token', '.*')->middleware('throttle:public-interview');
 });
 
 // ===== Stripe Webhook (No Auth - Public) =====
@@ -104,6 +104,12 @@ Route::prefix('user')->middleware(['auth:sanctum', 'role:user', 'throttle:user']
     Route::get('/resume/{resume}', [ResumeController::class, 'show']);
     Route::get('/resume/{resume}/improvements', [ResumeController::class, 'improvements']);
     Route::delete('/resume/{resume}', [ResumeController::class, 'destroy']);
+
+        // ===== Notifications =====
+    Route::get('/notifications', [UserAuthController::class, 'notifications']);
+    Route::put('/notifications/{id}/read', [UserAuthController::class, 'markNotificationAsRead']);
+     Route::delete('/notifications', [UserAuthController::class, 'deleteAllNotifications']);
+    Route::delete('/notifications/{id}', [UserAuthController::class, 'deleteNotification']);
 });
 
 // ===== Candidate Routes (Legacy - معلقة مؤقتاً) =====
@@ -118,6 +124,12 @@ Route::prefix('company')->middleware(['auth:sanctum', 'role:company'])->group(fu
     Route::post('/logout', [CompanyAuthController::class, 'logout']);
     Route::get('/profile', [CompanyAuthController::class, 'profile']);
     Route::post('/profile', [CompanyAuthController::class, 'updateProfile']);
+
+        // ===== Notifications =====
+    Route::get('/notifications', [CompanyAuthController::class, 'notifications']);
+    Route::put('/notifications/{id}/read', [CompanyAuthController::class, 'markNotificationAsRead']);
+     Route::delete('/notifications', [CompanyAuthController::class, 'deleteAllNotifications']); 
+    Route::delete('/notifications/{id}', [CompanyAuthController::class, 'deleteNotification']);
 
     // ===== Billing Routes =====
     Route::prefix('billing')->group(function () {
@@ -208,44 +220,88 @@ Route::prefix('admin')->middleware(['auth:sanctum', 'role:admin,super_admin', 't
     Route::post('/broadcast/send', [AdminBroadcastController::class, 'send'])->middleware('throttle:5,10');
     Route::get('/broadcast', [AdminBroadcastController::class, 'index']);
     Route::get('/broadcast/{broadcast}', [AdminBroadcastController::class, 'show']);
+    Route::delete('/broadcast/{broadcast}', [AdminBroadcastController::class, 'destroy']);
+    Route::delete('/broadcast', [AdminBroadcastController::class, 'destroyAll']);
 
     // ===== Activity Logs =====
     Route::get('/activity-logs', [AdminActivityLogController::class, 'index']);
     Route::get('/activity-logs/stats', [AdminActivityLogController::class, 'stats']);
     Route::get('/activity-logs/{id}', [AdminActivityLogController::class, 'show']);
     Route::delete('/activity-logs/clean', [AdminActivityLogController::class, 'clean']);
+
+
+    // 🔹 NEW: Backup Routes
+
+    Route::prefix('backups')->group(function () {
+        Route::get('/', [AdminController::class, 'backups']);
+        Route::post('/', [AdminController::class, 'createBackup']);
+        Route::get('/stats', [AdminController::class, 'backupStats']);
+        Route::get('/{backup}/download', [AdminController::class, 'downloadBackup']);
+        Route::delete('/{backup}', [AdminController::class, 'deleteBackup']);
+
 });
 
-// ===== Interview Routes (for regular users - practice) =====
-Route::middleware(['auth:sanctum', 'role:user', 'throttle:interview'])->group(function () {
-    Route::apiResource('interviews', InterviewController::class)->except(['update', 'destroy']);
-    Route::post('/interviews/{interview}/complete', [InterviewController::class, 'complete']);
-    Route::get('/interviews/{interview}/status', [InterviewController::class, 'checkFinalStatus']);
-    Route::get('/interviews/{interview}/report', [InterviewController::class, 'getFinalReport']);
-    Route::get('/interviews/{interview}/report-ready', [InterviewController::class, 'checkReportReady']);
+// ============================================================
+// 🔹 Interview Routes (for regular users - practice)
+// ============================================================
+Route::middleware(['auth:sanctum', 'role:user'])->group(function () {
+    // ===== Interviews =====
+    Route::apiResource('interviews', InterviewController::class)->except(['update', 'destroy'])
+        ->middleware('throttle:start-interview'); // 🔹 NEW: حد لبدء المقابلات
 
-    // Session Management Routes
-    Route::get('/interviews/{interview}/session', [InterviewController::class, 'sessionStatus']);
-    Route::get('/interviews/resume/{token}', [InterviewController::class, 'resumeByToken']);
+    Route::post('/interviews/{interview}/complete', [InterviewController::class, 'complete'])
+        ->middleware('throttle:complete-interview'); // 🔹 NEW
 
-    // Resume Interview Routes
-    Route::get('/interviews/{interview}/resume', [InterviewController::class, 'resume']);
-    Route::get('/interviews/{interview}/can-resume', [InterviewController::class, 'canResume']);
+    Route::get('/interviews/{interview}/status', [InterviewController::class, 'checkFinalStatus'])
+        ->middleware('throttle:session-status'); // 🔹 NEW
 
-    // Tab Lock Routes
-    Route::get('/interviews/{interview}/lock-status', [InterviewController::class, 'lockStatus']);
-    Route::post('/interviews/{interview}/lock', [InterviewController::class, 'lock']);
-    Route::post('/interviews/{interview}/unlock', [InterviewController::class, 'unlock']);
-    Route::post('/interviews/{interview}/refresh-lock', [InterviewController::class, 'refreshLock']);
+    Route::get('/interviews/{interview}/report', [InterviewController::class, 'getFinalReport'])
+        ->middleware('throttle:get-report'); // 🔹 NEW
 
-    // Answers
-    Route::post('/answers', [AnswerController::class, 'store'])->middleware('throttle:interview');
+    Route::get('/interviews/{interview}/report-ready', [InterviewController::class, 'checkReportReady'])
+        ->middleware('throttle:check-report'); // 🔹 NEW
+
+    // ===== Session Management =====
+    Route::get('/interviews/{interview}/session', [InterviewController::class, 'sessionStatus'])
+        ->middleware('throttle:session-status'); // 🔹 NEW
+
+    Route::get('/interviews/resume/{token}', [InterviewController::class, 'resumeByToken'])
+        ->middleware('throttle:resume-interview'); // 🔹 NEW
+
+    // ===== Resume Interview =====
+    Route::get('/interviews/{interview}/resume', [InterviewController::class, 'resume'])
+        ->middleware('throttle:resume-interview'); // 🔹 NEW
+
+    Route::get('/interviews/{interview}/can-resume', [InterviewController::class, 'canResume'])
+        ->middleware('throttle:session-status'); // 🔹 NEW
+
+    // ===== Tab Lock =====
+    Route::get('/interviews/{interview}/lock-status', [InterviewController::class, 'lockStatus'])
+        ->middleware('throttle:interview-lock'); // 🔹 NEW
+
+    Route::post('/interviews/{interview}/lock', [InterviewController::class, 'lock'])
+        ->middleware('throttle:interview-lock'); // 🔹 NEW
+
+    Route::post('/interviews/{interview}/unlock', [InterviewController::class, 'unlock'])
+        ->middleware('throttle:interview-lock'); // 🔹 NEW
+
+    Route::post('/interviews/{interview}/refresh-lock', [InterviewController::class, 'refreshLock'])
+        ->middleware('throttle:refresh-lock'); // 🔹 NEW
+
+    // ===== Answers =====
+    Route::post('/answers', [AnswerController::class, 'store'])
+        ->middleware('throttle:submit-answer'); // 🔹 NEW
+
     Route::get('/answers/{answer}', [AnswerController::class, 'show']);
 
-    // Anti-cheat
-    Route::post('/anti-cheat/violations', [AntiCheatController::class, 'store']);
+    // ===== Anti-cheat =====
+    Route::post('/anti-cheat/violations', [AntiCheatController::class, 'store'])
+        ->middleware('throttle:anti-cheat'); // 🔹 NEW
+
     Route::get('/interviews/{interview}/violations', [AntiCheatController::class, 'index']);
 
-    // Interview Answer AI Analysis
-    Route::post('/analyze-answer', [InterviewAnalysisController::class, 'analyze']);
+    // ===== Interview Answer AI Analysis =====
+    Route::post('/analyze-answer', [InterviewAnalysisController::class, 'analyze'])
+        ->middleware('throttle:submit-answer'); // 🔹 NEW
+});
 });

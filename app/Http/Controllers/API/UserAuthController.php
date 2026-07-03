@@ -261,4 +261,116 @@ class UserAuthController extends Controller
             'message' => 'Logged out successfully',
         ]);
     }
+
+
+
+    /**
+     * Get all notifications for the authenticated user
+     * GET /api/user/notifications
+     */
+    public function notifications(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        $notifications = $user->notifications()
+            ->orderBy('created_at', 'desc')
+            ->paginate($request->get('per_page', 20));
+
+        return response()->json([
+            'success' => true,
+            'data' => $notifications->map(function ($notification) {
+                // ✅ التأكد من أن data هي Array (وليس String)
+                $data = $notification->data;
+
+                // إذا كانت String، قم بتحويلها إلى Array
+                if (is_string($data)) {
+                    $data = json_decode($data, true);
+                }
+
+                return [
+                    'id' => $notification->id,
+                    'title' => $data['title'] ?? null,
+                    'message' => $data['message'] ?? null,
+                    'sender' => $data['sender'] ?? 'admin',
+                    'sender_name' => $data['sender_name'] ?? 'Admin',
+                    'read_at' => $notification->read_at,
+                    'created_at' => $notification->created_at,
+                    'is_read' => $notification->read_at !== null,
+                ];
+            }),
+            'meta' => [
+                'current_page' => $notifications->currentPage(),
+                'total' => $notifications->total(),
+                'per_page' => $notifications->perPage(),
+                'unread_count' => $user->unreadNotifications->count(),
+            ],
+        ]);
+    }
+
+    /**
+     * Mark a notification as read
+     * PUT /api/user/notifications/{id}/read
+     */
+    public function markNotificationAsRead(string $id): JsonResponse
+    {
+        $user = $request->user();
+        $notification = $user->notifications()->find($id);
+
+        if (!$notification) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Notification not found',
+            ], 404);
+        }
+
+        $notification->markAsRead();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Notification marked as read',
+        ]);
+    }
+
+
+    /**
+ * Delete all notifications for the authenticated user
+ * DELETE /api/user/notifications
+ */
+public function deleteAllNotifications(Request $request): JsonResponse
+{
+    $user = $request->user();
+    $deleted = $user->notifications()->delete();
+
+    return response()->json([
+        'success' => true,
+        'message' => "Deleted {$deleted} notifications",
+        'data' => [
+            'deleted_count' => $deleted,
+        ],
+    ]);
+}
+
+/**
+ * Delete a specific notification
+ * DELETE /api/user/notifications/{id}
+ */
+public function deleteNotification(Request $request, string $id): JsonResponse
+{
+    $user = $request->user();
+    $notification = $user->notifications()->find($id);
+
+    if (!$notification) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Notification not found',
+        ], 404);
+    }
+
+    $notification->delete();
+
+    return response()->json([
+        'success' => true,
+        'message' => 'Notification deleted successfully',
+    ]);
+}
 }

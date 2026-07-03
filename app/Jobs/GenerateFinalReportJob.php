@@ -17,8 +17,8 @@ class GenerateFinalReportJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $tries = 2;
-    public $backoff = [60, 120];
+    public $tries = 3; // 🔹 زيادة عدد المحاولات
+    public $backoff = [60, 120, 300]; // 🔹 زيادة وقت الانتظار بين المحاولات
     public $timeout = 600;
 
     protected Interview $interview;
@@ -38,6 +38,38 @@ class GenerateFinalReportJob implements ShouldQueue
     public function handle(LLMService $llmService): void
     {
         try {
+            // ============================================================
+            // 🔹 NEW: Check if report is already generated
+            // ============================================================
+            if ($this->interview->isReportGenerated()) {
+                Log::info('⏭️ Report already generated, skipping job', [
+                    'interview_id' => $this->interview->id,
+                    'report_exists' => $this->interview->finalReport()->exists(),
+                    'completed_at' => $this->interview->report_generation_completed_at,
+                ]);
+                return;
+            }
+
+            // ============================================================
+            // 🔹 NEW: Acquire report generation lock
+            // ============================================================
+            if (!$this->interview->acquireReportLock()) {
+                Log::info('⏳ Report generation already in progress, releasing job', [
+                    'interview_id' => $this->interview->id,
+                    'started_at' => $this->interview->report_generation_started_at,
+                    'attempts' => $this->interview->report_generation_attempts,
+                ]);
+
+                // If lock is held by another process, release this job to retry later
+                $this->release(30);
+                return;
+            }
+
+            Log::info('🔒 Report generation lock acquired', [
+                'interview_id' => $this->interview->id,
+                'attempts' => $this->interview->report_generation_attempts,
+            ]);
+
             // ✅ شرط 1: التأكد من أن جميع الإجابات قد اكتملت
             if (!$this->interview->hasAllAnswersProcessed()) {
                 Log::info('⏳ Not all answers processed yet, releasing job back to queue', [
@@ -46,6 +78,8 @@ class GenerateFinalReportJob implements ShouldQueue
                     'total' => $this->interview->questions()->count()
                 ]);
 
+                // 🔹 NEW: Release lock and retry
+                $this->interview->resetReportLock();
                 $this->release(5);
                 return;
             }
@@ -61,6 +95,8 @@ class GenerateFinalReportJob implements ShouldQueue
                     'total_questions' => $totalQuestions
                 ]);
 
+                // 🔹 NEW: Release lock and retry
+                $this->interview->resetReportLock();
                 $this->release(3);
                 return;
             }
@@ -77,6 +113,8 @@ class GenerateFinalReportJob implements ShouldQueue
                     'total_answers' => $totalQuestions
                 ]);
 
+                // 🔹 NEW: Release lock and retry
+                $this->interview->resetReportLock();
                 $this->release(3);
                 return;
             }
@@ -146,6 +184,17 @@ class GenerateFinalReportJob implements ShouldQueue
                 'data_keys' => array_keys($reportData)
             ]);
 
+            // ============================================================
+            // 🔹 NEW: Double-check that report wasn't created during generation
+            // ============================================================
+            if ($this->interview->isReportGenerated()) {
+                Log::info('⏭️ Report was generated during processing, skipping save', [
+                    'interview_id' => $this->interview->id,
+                ]);
+                $this->interview->releaseReportLock();
+                return;
+            }
+
             // 🔍 DEBUG: Check what we're about to save
             Log::info('📝 Attempting to save report with data:', [
                 'interview_id' => $this->interview->id,
@@ -154,7 +203,6 @@ class GenerateFinalReportJob implements ShouldQueue
                 'technical_score' => $reportData['technical_score'] ?? null,
                 'communication_score' => $reportData['communication_score'] ?? null,
                 'problem_solving_score' => $reportData['problem_solving_score'] ?? null,
-                // 🔹 NEW
                 'risk_level' => $riskData['risk_level'],
                 'risk_description' => $riskData['risk_description'],
             ]);
@@ -166,7 +214,7 @@ class GenerateFinalReportJob implements ShouldQueue
                     'overall_score' => $reportData['overall_score'],
                     'adjusted_score' => $reportData['adjusted_score'],
                     'cheating_severity_score' => $cheatingSeverityScore,
-                    // 🔹 NEW: Cheating Risk Level fields
+                    // 🔹 Cheating Risk Level fields
                     'cheating_risk_level' => $riskData['risk_level'],
                     'cheating_risk_description' => $riskData['risk_description'],
                     'cheating_recommendation' => $riskData['recommendation'],
@@ -182,7 +230,7 @@ class GenerateFinalReportJob implements ShouldQueue
                     'technical_score' => $reportData['technical_score'],
                     'communication_score' => $reportData['communication_score'],
                     'problem_solving_score' => $reportData['problem_solving_score'],
-                    // 🔹 NEW: Educational Fields
+                    // 🔹 Educational Fields
                     'educational_summary' => $reportData['educational_summary'] ?? null,
                     'key_strengths' => $reportData['key_strengths'] ?? null,
                     'key_weaknesses' => $reportData['key_weaknesses'] ?? null,
@@ -194,6 +242,11 @@ class GenerateFinalReportJob implements ShouldQueue
                     'generated_at' => now(),
                 ]
             );
+
+            // ============================================================
+            // 🔹 NEW: Release the lock and mark as completed
+            // ============================================================
+            $this->interview->releaseReportLock();
 
             Log::info('✅ Final report saved to database', [
                 'interview_id' => $this->interview->id,
@@ -221,20 +274,31 @@ class GenerateFinalReportJob implements ShouldQueue
                 'cheating_severity' => $cheatingSeverityScore,
                 'risk_level' => $riskData['risk_level'],
                 'risk_label' => $riskData['risk_label'],
+                'attempts' => $this->interview->report_generation_attempts,
             ]);
         } catch (\Exception $e) {
             Log::error('💥 Failed to generate final report', [
                 'interview_id' => $this->interview->id,
                 'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
+                'trace' => $e->getTraceAsString(),
+                'attempts' => $this->interview->report_generation_attempts ?? 0,
             ]);
+
+            // ============================================================
+            // 🔹 NEW: Reset lock on failure (allow retry)
+            // ============================================================
+            $this->interview->resetReportLock();
 
             // Mark interview as failed
             $this->interview->update([
                 'status' => Interview::STATUS_FAILED,
                 'metadata' => array_merge(
                     $this->interview->metadata ?? [],
-                    ['report_generation_error' => $e->getMessage()]
+                    [
+                        'report_generation_error' => $e->getMessage(),
+                        'failed_at' => now()->toISOString(),
+                        'attempts' => $this->interview->report_generation_attempts ?? 0,
+                    ]
                 )
             ]);
 
@@ -247,11 +311,28 @@ class GenerateFinalReportJob implements ShouldQueue
      */
     public function failed(\Throwable $exception): void
     {
-        Log::error('GenerateFinalReportJob failed', [
+        Log::error('GenerateFinalReportJob failed permanently', [
             'interview_id' => $this->interview->id,
-            'error' => $exception->getMessage()
+            'error' => $exception->getMessage(),
+            'attempts' => $this->interview->report_generation_attempts ?? 0,
         ]);
 
-        // Notify admin or implement retry logic
+        // ============================================================
+        // 🔹 NEW: Ensure lock is released on permanent failure
+        // ============================================================
+        $this->interview->resetReportLock();
+
+        // Update interview status
+        $this->interview->update([
+            'status' => Interview::STATUS_FAILED,
+            'metadata' => array_merge(
+                $this->interview->metadata ?? [],
+                [
+                    'report_generation_failed_permanently' => true,
+                    'error' => $exception->getMessage(),
+                    'failed_at' => now()->toISOString(),
+                ]
+            ),
+        ]);
     }
 }

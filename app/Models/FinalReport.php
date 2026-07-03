@@ -69,4 +69,21 @@ class FinalReport extends Model
     {
         return $this->belongsTo(Interview::class);
     }
+
+
+    /**
+ * Check if a report already exists for this interview
+ */
+public static function existsForInterview(int $interviewId): bool
+{
+    return self::where('interview_id', $interviewId)->exists();
+}
+
+/**
+ * Get report by interview ID
+ */
+public static function findByInterview(int $interviewId): ?self
+{
+    return self::where('interview_id', $interviewId)->first();
+}
 }
