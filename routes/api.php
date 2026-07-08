@@ -134,7 +134,7 @@ Route::prefix('company')
         // ============================================================
         // ✅ Company Dashboard
         // ============================================================
-       // ✅ Company Dashboard
+        // ✅ Company Dashboard
         Route::get('/dashboard', [CompanyDashboardController::class, 'index'])
             ->middleware('checkpermission:company.dashboard.view');
 
@@ -351,6 +351,15 @@ Route::prefix('admin')
         });
 
         // ============================================================
+        // ✅ Company Employees (موظفي الشركات)
+        // ============================================================
+        Route::get('/company-employees', [AdminUserController::class, 'companyEmployees'])
+            ->middleware('checkpermission:admin.users.view');
+
+        Route::get('/company-employees/{employee}', [AdminUserController::class, 'showCompanyEmployee']);
+
+
+        // ============================================================
         // ✅ Companies Management
         // ============================================================
         Route::prefix('companies')->group(function () {
@@ -470,23 +479,42 @@ Route::prefix('admin')
                 Route::delete('/{backup}', [AdminController::class, 'deleteBackup']);
             });
 
-        // ============================================================
-        // 🔹 Admin Management - فقط super_admin
-        // ============================================================
-        Route::prefix('admins')
-            ->middleware('checkrole:super_admin')
-            ->group(function () {
-                Route::get('/', [AdminUserController::class, 'adminsList']);
-                Route::post('/', [AdminUserController::class, 'store']);
-                Route::get('/{admin}', [AdminUserController::class, 'showAdmin']);
-                Route::delete('/{admin}', [AdminUserController::class, 'destroyAdmin']);
-                Route::post('/{admin}/suspend', [AdminUserController::class, 'suspendAdmin']);
-                Route::post('/{admin}/activate', [AdminUserController::class, 'activateAdmin']);
-                Route::post('/{admin}/roles', [AdminUserController::class, 'assignRole']);
-                Route::delete('/{admin}/roles/{role}', [AdminUserController::class, 'removeRole']);
-                Route::post('/{admin}/permissions', [AdminUserController::class, 'syncPermissions']);
-                Route::get('/{admin}/permissions', [AdminUserController::class, 'getPermissions']);
-            });
+// ============================================================
+// 🔹 Admin Management - فقط super_admin
+// ============================================================
+Route::prefix('admins')
+    ->middleware('checkrole:super_admin')
+    ->group(function () {
+        Route::get('/', [AdminUserController::class, 'adminsList'])
+            ->middleware('checkpermission:admin.users.view');
+
+        Route::post('/', [AdminUserController::class, 'store'])
+            ->middleware('checkpermission:admin.users.create');
+
+        Route::get('/{admin}', [AdminUserController::class, 'showAdmin'])
+            ->middleware('checkpermission:admin.users.view');
+
+        Route::delete('/{admin}', [AdminUserController::class, 'destroyAdmin'])
+            ->middleware('checkpermission:admin.users.delete');
+
+        Route::post('/{admin}/suspend', [AdminUserController::class, 'suspendAdmin'])
+            ->middleware('checkpermission:admin.users.suspend');
+
+        Route::post('/{admin}/activate', [AdminUserController::class, 'activateAdmin'])
+            ->middleware('checkpermission:admin.users.update');
+
+        Route::post('/{admin}/roles', [AdminUserController::class, 'assignRole'])
+            ->middleware('checkpermission:admin.roles.update');
+
+        Route::delete('/{admin}/roles/{role}', [AdminUserController::class, 'removeRole'])
+            ->middleware('checkpermission:admin.roles.update');
+
+        Route::post('/{admin}/permissions', [AdminUserController::class, 'syncPermissions'])
+            ->middleware('checkpermission:admin.permissions.update');
+
+        Route::get('/{admin}/permissions', [AdminUserController::class, 'getPermissions'])
+            ->middleware('checkpermission:admin.permissions.view');
+    });
 
         // ============================================================
         // 🔹 Roles Management - فقط super_admin

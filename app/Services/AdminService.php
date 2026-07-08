@@ -24,20 +24,28 @@ class AdminService
     /**
      * Get dashboard statistics
      */
-    public function getDashboardStats(): array
-    {
-        return [
-            'total_users' => User::count(),
-            'total_companies' => Company::count(),
-            'total_jobs' => CompanyJob::count(),
-            'total_interviews' => Interview::count(),
-            'completed_interviews' => Interview::where('status', 'completed_with_report')->count(),
-            'pending_companies' => Company::where('status', 'pending')->count(),
-            'active_jobs' => CompanyJob::where('status', 'active')->count(),
-            'recent_users' => User::orderBy('created_at', 'desc')->take(5)->get(),
-            'recent_companies' => Company::orderBy('created_at', 'desc')->take(5)->get(),
-        ];
-    }
+public function getDashboardStats(): array
+{
+    return [
+        'total_users' => User::count(),
+        'total_companies' => Company::count(),
+        'total_jobs' => CompanyJob::count(),
+        'total_interviews' => Interview::count(),
+        'completed_interviews' => Interview::where('status', 'completed_with_report')->count(),
+        'pending_companies' => Company::where('status', 'pending')->count(),
+        'active_jobs' => CompanyJob::where('status', 'active')->count(),
+
+        // ✅ فقط المستخدمين العاديين (وليس موظفي الشركات)
+        'recent_users' => User::where('role', 'user')
+            ->whereNull('company_id')  // ✅ استثناء موظفي الشركات
+            ->orWhere('is_company_employee', false)
+            ->orderBy('created_at', 'desc')
+            ->take(5)
+            ->get(),
+
+        'recent_companies' => Company::orderBy('created_at', 'desc')->take(5)->get(),
+    ];
+}
 
     /**
      * Get pending company registration requests

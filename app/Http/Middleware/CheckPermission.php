@@ -1,5 +1,4 @@
 <?php
-// app/Http/Middleware/CheckPermission.php
 
 namespace App\Http\Middleware;
 
@@ -23,32 +22,12 @@ class CheckPermission
         // ✅ تحديد الـ Guard المناسب
         $guard = $this->getUserGuard($user);
 
-        // ✅ التحقق من الصلاحيات حسب الـ Guard
+        // ✅ جلب صلاحيات المستخدم
+        $userPermissions = $this->getUserPermissions($user);
+
+        // ✅ التحقق من الصلاحيات
         foreach ($permissions as $permission) {
-            // 1. التحقق من الصلاحيات المباشرة
-            $hasDirectPermission = DB::table('model_has_permissions')
-                ->where('model_id', $user->id)
-                ->where('model_type', get_class($user))
-                ->join('permissions', 'model_has_permissions.permission_id', '=', 'permissions.id')
-                ->where('permissions.name', $permission)
-                ->where('permissions.guard_name', $guard)
-                ->exists();
-
-            if ($hasDirectPermission) {
-                return $next($request);
-            }
-
-            // 2. التحقق من الصلاحيات عبر الأدوار
-            $hasRolePermission = DB::table('model_has_roles')
-                ->where('model_id', $user->id)
-                ->where('model_type', get_class($user))
-                ->join('role_has_permissions', 'model_has_roles.role_id', '=', 'role_has_permissions.role_id')
-                ->join('permissions', 'role_has_permissions.permission_id', '=', 'permissions.id')
-                ->where('permissions.name', $permission)
-                ->where('permissions.guard_name', $guard)
-                ->exists();
-
-            if ($hasRolePermission) {
+            if (in_array($permission, $userPermissions)) {
                 return $next($request);
             }
         }
@@ -71,7 +50,7 @@ class CheckPermission
             'success' => false,
             'message' => 'Unauthorized. You do not have the required permission.',
             'required_permissions' => $permissions,
-            'your_permissions' => $this->getUserPermissions($user, $guard),
+            'your_permissions' => $userPermissions,
         ], 403);
     }
 
@@ -89,7 +68,9 @@ class CheckPermission
         }
 
         if ($user instanceof \App\Models\User) {
-            // ✅ الموظف يستخدم guard = user أيضاً
+            if ($user->isCompanyEmployee()) {
+                return 'company';
+            }
             return 'user';
         }
 
@@ -99,31 +80,40 @@ class CheckPermission
     /**
      * جلب صلاحيات المستخدم
      */
-    private function getUserPermissions($user, string $guard): array
+    private function getUserPermissions($user): array
     {
-        try {
-            // 1. الصلاحيات المباشرة
-            $directPermissions = DB::table('model_has_permissions')
-                ->where('model_id', $user->id)
-                ->where('model_type', get_class($user))
-                ->join('permissions', 'model_has_permissions.permission_id', '=', 'permissions.id')
-                ->where('permissions.guard_name', $guard)
-                ->pluck('permissions.name')
-                ->toArray();
+        // ✅ إذا كان المستخدم Admin
+        if ($user instanceof \App\Models\Admin) {
+            // ✅ استخدام getPermissionsByRole() مباشرة
+            return $user->getPermissionsByRole();
+        }
 
-            // 2. الصلاحيات عبر الأدوار
-            $rolePermissions = DB::table('model_has_roles')
-                ->where('model_id', $user->id)
-                ->where('model_type', get_class($user))
-                ->join('role_has_permissions', 'model_has_roles.role_id', '=', 'role_has_permissions.role_id')
-                ->join('permissions', 'role_has_permissions.permission_id', '=', 'permissions.id')
-                ->where('permissions.guard_name', $guard)
-                ->pluck('permissions.name')
-                ->toArray();
-
-            return array_unique(array_merge($directPermissions, $rolePermissions));
-        } catch (\Exception $e) {
+        // ✅ إذا كان المستخدم Company
+        if ($user instanceof \App\Models\Company) {
+            try {
+                $permissions = $user->getAllPermissions();
+                if ($permissions && $permissions->isNotEmpty()) {
+                    return $permissions->pluck('name')->toArray();
+                }
+            } catch (\Exception $e) {
+                return [];
+            }
             return [];
         }
+
+        // ✅ إذا كان المستخدم User
+        if ($user instanceof \App\Models\User) {
+            try {
+                $permissions = $user->getAllPermissions();
+                if ($permissions && $permissions->isNotEmpty()) {
+                    return $permissions->pluck('name')->toArray();
+                }
+            } catch (\Exception $e) {
+                return [];
+            }
+            return [];
+        }
+
+        return [];
     }
 }

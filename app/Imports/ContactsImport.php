@@ -5,6 +5,7 @@ namespace App\Imports;
 use App\Jobs\SendInvitationEmailJob;
 use App\Models\Candidate;
 use App\Models\CompanyJob;
+use App\Models\CompanyJobCandidate;
 use App\Models\EmailInvitation;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Support\Collection;
@@ -70,7 +71,16 @@ class ContactsImport implements ToCollection, WithHeadingRow, WithChunkReading, 
                     'status' => 'pending',
                     'invited_at' => now(),
                 ]);
-                Log::info("✅ Candidate created successfully: ID {$candidate->id}, Email: {$email}");
+                Log::info("✅ Candidate created: ID {$candidate->id}");
+
+                // ✅ إضافة سجل في company_job_candidates
+                CompanyJobCandidate::create([
+                    'company_job_id' => $this->job->id,
+                    'candidate_id' => $candidate->id,
+                    'status' => 'pending',
+                    'invited_at' => now(),
+                ]);
+                Log::info("✅ CompanyJobCandidate created for candidate: {$candidate->id}");
             } catch (\Exception $e) {
                 Log::error("❌ Failed to create candidate: " . $e->getMessage());
                 continue;

@@ -105,34 +105,51 @@ class CheckRole
         return ['unknown'];
     }
 
-    /**
-     * الحصول على صلاحيات المستخدم
-     */
-    private function getUserPermissions($user): array
-    {
-        try {
-            if (method_exists($user, 'getAllPermissions')) {
+/**
+ * الحصول على صلاحيات المستخدم
+ */
+private function getUserPermissions($user): array
+{
+    try {
+        // ✅ إذا كان المستخدم Admin
+        if ($user instanceof \App\Models\Admin) {
+            // ✅ استخدام getPermissionsByRole() بدلاً من getAllPermissions()
+            return $user->getPermissionsByRole();
+        }
+
+        // ✅ إذا كان المستخدم Company
+        if ($user instanceof \App\Models\Company) {
+            try {
                 $permissions = $user->getAllPermissions();
                 if ($permissions && $permissions->isNotEmpty()) {
                     return $permissions->pluck('name')->toArray();
                 }
-            }
-        } catch (\Exception $e) {
-            \Illuminate\Support\Facades\Log::warning('CheckRole: Failed to get permissions', [
-                'error' => $e->getMessage(),
-                'user_type' => get_class($user),
-            ]);
-        }
-
-        // Fallback لـ Company Owner
-        if ($user instanceof \App\Models\Company) {
-            try {
-                return $user->getAllPermissions()->pluck('name')->toArray();
             } catch (\Exception $e) {
                 return [];
             }
+            return [];
+        }
+
+        // ✅ إذا كان المستخدم User (عادي أو موظف)
+        if ($user instanceof \App\Models\User) {
+            try {
+                $permissions = $user->getAllPermissions();
+                if ($permissions && $permissions->isNotEmpty()) {
+                    return $permissions->pluck('name')->toArray();
+                }
+            } catch (\Exception $e) {
+                return [];
+            }
+            return [];
         }
 
         return [];
+    } catch (\Exception $e) {
+        \Illuminate\Support\Facades\Log::warning('CheckRole: Failed to get permissions', [
+            'error' => $e->getMessage(),
+            'user_type' => get_class($user),
+        ]);
+        return [];
     }
+}
 }

@@ -27,12 +27,17 @@ class AdminUserController extends Controller
     }
 
     /**
-     * Get all regular users with pagination (جلب جميع المستخدمين العاديين)
+     * Get all regular users with pagination (جلب جميع المستخدمين العاديين فقط)
+     * استبعاد موظفي الشركات
      */
     public function index(Request $request): JsonResponse
     {
-        // جلب المستخدمين العاديين فقط (role = 'user')
+        // ✅ جلب المستخدمين العاديين فقط (وليس موظفي الشركات)
         $users = User::where('role', 'user')
+            ->where(function ($query) {
+                $query->whereNull('company_id')
+                    ->orWhere('is_company_employee', false);
+            })
             ->orderBy('created_at', 'desc')
             ->paginate($request->get('per_page', 20));
 
@@ -45,6 +50,8 @@ class AdminUserController extends Controller
                 'is_active' => $user->is_active,
                 'avatar' => $user->avatar,
                 'bio' => $user->bio,
+                'is_company_employee' => $user->is_company_employee,
+                'company_id' => $user->company_id,
                 'created_at' => $user->created_at,
             ];
         });
@@ -52,6 +59,36 @@ class AdminUserController extends Controller
         return response()->json([
             'success' => true,
             'data' => $users,
+        ]);
+    }
+
+    /**
+     * Get all company employees (جلب جميع موظفي الشركات)
+     * GET /api/admin/company-employees
+     */
+    public function companyEmployees(Request $request): JsonResponse
+    {
+        $employees = User::where('is_company_employee', true)
+            ->with('company')  // ✅ جلب بيانات الشركة
+            ->orderBy('created_at', 'desc')
+            ->paginate($request->get('per_page', 20));
+
+        $employees->getCollection()->transform(function ($employee) {
+            return [
+                'id' => $employee->id,
+                'name' => $employee->name,
+                'email' => $employee->email,
+                'is_active' => $employee->is_active,
+                'company_id' => $employee->company_id,
+                'company_name' => $employee->company?->company_name,
+                'permissions' => $employee->getAllPermissions()->pluck('name'),
+                'created_at' => $employee->created_at,
+            ];
+        });
+
+        return response()->json([
+            'success' => true,
+            'data' => $employees,
         ]);
     }
 
@@ -177,11 +214,12 @@ class AdminUserController extends Controller
 
     /**
      * Get user details (عرض مستخدم عادي محدد)
+     * GET /api/admin/users/{user}
      */
     public function show(User $user): JsonResponse
     {
-        // التحقق من أن المستخدم عادي
-        if ($user->role !== 'user') {
+        // ✅ التحقق من أن المستخدم عادي (وليس موظف في شركة)
+        if ($user->role !== 'user' || $user->isCompanyEmployee()) {
             return response()->json([
                 'success' => false,
                 'message' => 'هذا المستخدم ليس مستخدماً عادياً.',
@@ -203,319 +241,354 @@ class AdminUserController extends Controller
         ]);
     }
 
+    /**
+ * Show specific company employee (عرض موظف شركة محدد)
+ * GET /api/admin/company-employees/{employee}
+ */
+public function showCompanyEmployee($employeeId): JsonResponse
+{
+    $employee = User::where('id', $employeeId)
+        ->where('is_company_employee', true)
+        ->with('company')
+        ->first();
+
+    if (!$employee) {
+        return response()->json([
+            'success' => false,
+            'message' => 'موظف الشركة غير موجود.',
+        ], 404);
+    }
+
+    return response()->json([
+        'success' => true,
+        'data' => [
+            'id' => $employee->id,
+            'name' => $employee->name,
+            'email' => $employee->email,
+            'is_active' => $employee->is_active,
+            'company_id' => $employee->company_id,
+            'company_name' => $employee->company?->company_name,
+            'permissions' => $employee->getAllPermissions()->pluck('name'),
+            'created_at' => $employee->created_at,
+            'updated_at' => $employee->updated_at,
+        ],
+    ]);
+}
+
     // ============================================================
     // ✅ ADMIN MANAGEMENT (محدث مع Spatie)
     // ============================================================
 
-/**
- * Create a new admin
- * POST /api/admin/admins
- */
-public function store(CreateAdminRequest $request): JsonResponse
-{
-    Log::info('Creating new admin:', [
-        'email' => $request->email,
-        'role' => $request->role ?? 'admin',
-        'template_id' => $request->template_id,
-        'permissions' => $request->permissions ?? 'default',
-    ]);
-
-    try {
-        // ✅ 1. إنشاء الأدمن
-        $admin = Admin::create([
-            'name' => $request->name,
+    /**
+     * Create a new admin
+     * POST /api/admin/admins
+     */
+    public function store(CreateAdminRequest $request): JsonResponse
+    {
+        Log::info('Creating new admin:', [
             'email' => $request->email,
-            'password' => bcrypt($request->password),
             'role' => $request->role ?? 'admin',
-            'is_active' => true,
-            'last_login_at' => null,
+            'template_id' => $request->template_id,
+            'permissions' => $request->permissions ?? 'default',
         ]);
 
-        $roleName = $request->role ?? 'admin';
-        $role = Role::where('name', $roleName)->where('guard_name', 'admin')->first();
+        try {
+            // ✅ 1. إنشاء الأدمن
+            $admin = Admin::create([
+                'name' => $request->name,
+                'email' => $request->email,
+                'password' => bcrypt($request->password),
+                'role' => $request->role ?? 'admin',
+                'is_active' => true,
+                'last_login_at' => null,
+            ]);
 
-        if ($role) {
-            $admin->assignRole($role);
-        }
+            $roleName = $request->role ?? 'admin';
+            $role = Role::where('name', $roleName)->where('guard_name', 'admin')->first();
 
-        // ✅ 2. تعيين الصلاحيات (من قالب أو مخصصة)
-        $permissionsToAssign = [];
+            if ($role) {
+                $admin->assignRole($role);
+            }
 
-        // ✅ 2.1: إذا تم إرسال template_id، استخدم صلاحيات القالب
-        if ($request->has('template_id') && $request->template_id) {
-            $template = PermissionTemplate::find($request->template_id);
+            // ✅ 2. تعيين الصلاحيات (من قالب أو مخصصة)
+            $permissionsToAssign = [];
 
-            if ($template) {
-                $permissionsToAssign = $template->permissions;
-                Log::info('Using template permissions', [
-                    'template_id' => $template->id,
-                    'template_name' => $template->name,
+            // ✅ 2.1: إذا تم إرسال template_id، استخدم صلاحيات القالب
+            if ($request->has('template_id') && $request->template_id) {
+                $template = PermissionTemplate::find($request->template_id);
+
+                if ($template) {
+                    $permissionsToAssign = $template->permissions;
+                    Log::info('Using template permissions', [
+                        'template_id' => $template->id,
+                        'template_name' => $template->name,
+                        'permissions_count' => count($permissionsToAssign),
+                    ]);
+                } else {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Template not found',
+                    ], 404);
+                }
+            }
+            // ✅ 2.2: إذا تم إرسال صلاحيات مخصصة، استخدمها
+            elseif ($request->has('permissions') && is_array($request->permissions) && !empty($request->permissions)) {
+                $permissionsToAssign = $request->permissions;
+                Log::info('Using custom permissions', [
                     'permissions_count' => count($permissionsToAssign),
                 ]);
-            } else {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Template not found',
-                ], 404);
             }
-        }
-        // ✅ 2.2: إذا تم إرسال صلاحيات مخصصة، استخدمها
-        elseif ($request->has('permissions') && is_array($request->permissions) && !empty($request->permissions)) {
-            $permissionsToAssign = $request->permissions;
-            Log::info('Using custom permissions', [
-                'permissions_count' => count($permissionsToAssign),
-            ]);
-        }
-        // ✅ 2.3: إذا لم يتم إرسال أي شيء، استخدم الصلاحيات الافتراضية حسب الدور
-        else {
-            if ($roleName === 'admin') {
-                $permissionsToAssign = [
-                    'admin.dashboard.view',
-                    'admin.users.view',
-                    'admin.users.create',
-                    'admin.users.update',
-                    'admin.companies.view',
-                    'admin.companies.approve',
-                    'admin.companies.reject',
-                    'admin.jobs.view',
-                    'admin.skills.view',
-                    'admin.skills.create',
-                    'admin.skills.update',
-                    'admin.skills.delete',
-                    'admin.categories.view',
-                    'admin.categories.create',
-                    'admin.categories.update',
-                    'admin.categories.delete',
-                    'admin.notifications.view',
-                    'admin.notifications.send',
-                    'admin.activity_logs.view',
-                    'admin.backups.view',
-                    'admin.backups.create',
-                    'admin.backups.download',
-                    'admin.plans.view',
-                    'admin.billing.view',
-                ];
-            } elseif ($roleName === 'super_admin') {
-                $permissionsToAssign = Permission::where('guard_name', 'admin')->pluck('name')->toArray();
+            // ✅ 2.3: إذا لم يتم إرسال أي شيء، استخدم الصلاحيات الافتراضية حسب الدور
+            else {
+                if ($roleName === 'admin') {
+                    $permissionsToAssign = [
+                        'admin.dashboard.view',
+                        'admin.users.view',
+                        'admin.users.create',
+                        'admin.users.update',
+                        'admin.companies.view',
+                        'admin.companies.approve',
+                        'admin.companies.reject',
+                        'admin.jobs.view',
+                        'admin.skills.view',
+                        'admin.skills.create',
+                        'admin.skills.update',
+                        'admin.skills.delete',
+                        'admin.categories.view',
+                        'admin.categories.create',
+                        'admin.categories.update',
+                        'admin.categories.delete',
+                        'admin.notifications.view',
+                        'admin.notifications.send',
+                        'admin.activity_logs.view',
+                        'admin.backups.view',
+                        'admin.backups.create',
+                        'admin.backups.download',
+                        'admin.plans.view',
+                        'admin.billing.view',
+                    ];
+                } elseif ($roleName === 'super_admin') {
+                    $permissionsToAssign = Permission::where('guard_name', 'admin')->pluck('name')->toArray();
+                }
             }
-        }
 
-        // ✅ 3. تعيين الصلاحيات للأدمن
-        if (!empty($permissionsToAssign)) {
-            // ✅ التأكد من وجود الصلاحيات في قاعدة البيانات
-            foreach ($permissionsToAssign as $permName) {
-                Permission::firstOrCreate([
-                    'name' => $permName,
-                    'guard_name' => 'admin',
+            // ✅ 3. تعيين الصلاحيات للأدمن
+            if (!empty($permissionsToAssign)) {
+                // ✅ التأكد من وجود الصلاحيات في قاعدة البيانات
+                foreach ($permissionsToAssign as $permName) {
+                    Permission::firstOrCreate([
+                        'name' => $permName,
+                        'guard_name' => 'admin',
+                    ]);
+                }
+
+                $admin->syncPermissions($permissionsToAssign);
+                Log::info('Permissions assigned to admin', [
+                    'admin_id' => $admin->id,
+                    'permissions_count' => count($permissionsToAssign),
                 ]);
             }
 
-            $admin->syncPermissions($permissionsToAssign);
-            Log::info('Permissions assigned to admin', [
-                'admin_id' => $admin->id,
-                'permissions_count' => count($permissionsToAssign),
+            // ✅ 4. تسجيل النشاط
+            \App\Models\AdminLog::log('create_admin', 'admin', $admin->id, [
+                'admin_name' => $request->name,
+                'admin_email' => $request->email,
+                'role' => $roleName,
+                'template_id' => $request->template_id,
+                'permissions' => $permissionsToAssign,
+                'created_by' => auth()->user()->name ?? 'System',
             ]);
+
+            $admin->load('roles', 'permissions');
+
+            // ✅ 5. جلب الصلاحيات من قاعدة البيانات
+            $permissions = DB::table('model_has_permissions')
+                ->where('model_id', $admin->id)
+                ->where('model_type', 'App\\Models\\Admin')
+                ->join('permissions', 'model_has_permissions.permission_id', '=', 'permissions.id')
+                ->where('permissions.guard_name', 'admin')
+                ->pluck('permissions.name');
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Admin created successfully',
+                'data' => [
+                    'id' => $admin->id,
+                    'name' => $admin->name,
+                    'email' => $admin->email,
+                    'role' => $admin->role,
+                    'is_active' => $admin->is_active,
+                    'roles' => $admin->getRoleNames(),
+                    'permissions' => $permissions,
+                    'permissions_count' => $permissions->count(),
+                    'template_used' => $request->template_id ? PermissionTemplate::find($request->template_id)?->name : null,
+                    'created_at' => $admin->created_at,
+                ],
+            ], 201);
+        } catch (\Exception $e) {
+            Log::error('Failed to create admin: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to create admin: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+/**
+ * Get all admins list (قائمة الأدمن)
+ * GET /api/admin/admins
+ */
+public function adminsList(Request $request): JsonResponse
+{
+    $admins = Admin::orderBy('created_at', 'desc')
+        ->paginate($request->get('per_page', 20));
+
+    $admins->getCollection()->transform(function ($admin) {
+        // ✅ استخدام getPermissionsByRole() بدلاً من getAllPermissions()
+        $permissionNames = $admin->getPermissionsByRole();
+
+        // ✅ الحصول على اسم الدور
+        $roleNames = [$admin->role ?? 'admin'];
+
+        return [
+            'id' => $admin->id,
+            'name' => $admin->name,
+            'email' => $admin->email,
+            'role' => $admin->role,
+            'is_active' => $admin->is_active,
+            'roles' => $roleNames,
+            'permissions' => $permissionNames,
+            'last_login_at' => $admin->last_login_at,
+            'created_at' => $admin->created_at,
+        ];
+    });
+
+    return response()->json([
+        'success' => true,
+        'data' => $admins,
+    ]);
+}
+
+/**
+ * Show specific admin (عرض أدمن معين)
+ * GET /api/admin/admins/{admin}
+ */
+public function showAdmin(Admin $admin): JsonResponse
+{
+    // ✅ استخدام getPermissionsByRole() بدلاً من getAllPermissions()
+    $permissionNames = $admin->getPermissionsByRole();
+    $roleNames = [$admin->role ?? 'admin'];
+
+    return response()->json([
+        'success' => true,
+        'data' => [
+            'id' => $admin->id,
+            'name' => $admin->name,
+            'email' => $admin->email,
+            'role' => $admin->role,
+            'is_active' => $admin->is_active,
+            'roles' => $roleNames,
+            'permissions' => $permissionNames,
+            'last_login_at' => $admin->last_login_at,
+            'created_at' => $admin->created_at,
+            'updated_at' => $admin->updated_at,
+        ],
+    ]);
+}
+
+/**
+ * Delete admin (حذف أدمن)
+ * DELETE /api/admin/admins/{admin}
+ */
+public function destroyAdmin(Admin $admin): JsonResponse
+{
+    try {
+        $adminName = $admin->name;
+        $adminEmail = $admin->email;
+
+        // ✅ منع حذف الـ Super Admin الوحيد
+        if ($admin->isSuperAdmin()) {
+            $superAdminCount = Admin::where('role', 'super_admin')->count();
+            if ($superAdminCount <= 1) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Cannot delete the only Super Admin',
+                ], 400);
+            }
         }
 
-        // ✅ 4. تسجيل النشاط
-        \App\Models\AdminLog::log('create_admin', 'admin', $admin->id, [
-            'admin_name' => $request->name,
-            'admin_email' => $request->email,
-            'role' => $roleName,
-            'template_id' => $request->template_id,
-            'permissions' => $permissionsToAssign,
-            'created_by' => auth()->user()->name ?? 'System',
+        // ✅ تسجيل النشاط
+        \App\Models\AdminLog::log('delete_admin', 'admin', $admin->id, [
+            'admin_name' => $adminName,
+            'admin_email' => $adminEmail,
+            'deleted_by' => auth()->user()->name ?? 'System',
         ]);
 
-        $admin->load('roles', 'permissions');
-
-        // ✅ 5. جلب الصلاحيات من قاعدة البيانات
-        $permissions = DB::table('model_has_permissions')
-            ->where('model_id', $admin->id)
-            ->where('model_type', 'App\\Models\\Admin')
-            ->join('permissions', 'model_has_permissions.permission_id', '=', 'permissions.id')
-            ->where('permissions.guard_name', 'admin')
-            ->pluck('permissions.name');
+        // ✅ حذف سجل الأدمن مباشرة (بدون syncRoles أو syncPermissions)
+        $admin->delete();
 
         return response()->json([
             'success' => true,
-            'message' => 'Admin created successfully',
-            'data' => [
-                'id' => $admin->id,
-                'name' => $admin->name,
-                'email' => $admin->email,
-                'role' => $admin->role,
-                'is_active' => $admin->is_active,
-                'roles' => $admin->getRoleNames(),
-                'permissions' => $permissions,
-                'permissions_count' => $permissions->count(),
-                'template_used' => $request->template_id ? PermissionTemplate::find($request->template_id)?->name : null,
-                'created_at' => $admin->created_at,
-            ],
-        ], 201);
-
-    } catch (\Exception $e) {
-        Log::error('Failed to create admin: ' . $e->getMessage(), [
-            'trace' => $e->getTraceAsString(),
+            'message' => "Admin '{$adminName}' deleted successfully",
         ]);
 
+    } catch (\Exception $e) {
         return response()->json([
             'success' => false,
-            'message' => 'Failed to create admin: ' . $e->getMessage(),
+            'message' => 'Failed to delete admin: ' . $e->getMessage(),
         ], 500);
     }
 }
 
-    /**
-     * Get all admins list with roles and permissions (قائمة الأدمن)
-     * GET /api/admin/admins
-     */
-    public function adminsList(Request $request): JsonResponse
-    {
-        $admins = Admin::with('roles', 'permissions')
-            ->orderBy('created_at', 'desc')
-            ->paginate($request->get('per_page', 20));
+/**
+ * Suspend admin (تعليق أدمن)
+ * POST /api/admin/admins/{admin}/suspend
+ */
+public function suspendAdmin(Admin $admin, Request $request): JsonResponse
+{
+    try {
+        $adminName = $admin->name;
 
-        $admins->getCollection()->transform(function ($admin) {
-            return [
-                'id' => $admin->id,
-                'name' => $admin->name,
-                'email' => $admin->email,
-                'role' => $admin->role,
-                'is_active' => $admin->is_active,
-                'roles' => $admin->getRoleNames(),
-                'permissions' => $admin->getAllPermissions()->pluck('name'),
-                'last_login_at' => $admin->last_login_at,
-                'created_at' => $admin->created_at,
-            ];
-        });
+        // ✅ منع تعليق الـ Super Admin الوحيد
+        if ($admin->isSuperAdmin()) {
+            $superAdminCount = Admin::where('role', 'super_admin')->count();
+            if ($superAdminCount <= 1) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Cannot suspend the only Super Admin',
+                ], 400);
+            }
+        }
 
-        return response()->json([
-            'success' => true,
-            'data' => $admins,
+        // ✅ تحديث حالة الأدمن
+        $admin->update([
+            'is_active' => false,
         ]);
-    }
 
-    /**
-     * Show specific admin with roles and permissions (عرض أدمن معين)
-     * GET /api/admin/admins/{admin}
-     */
-    public function showAdmin(Admin $admin): JsonResponse
-    {
-        $admin->load('roles', 'permissions');
+        \App\Models\AdminLog::log('suspend_admin', 'admin', $admin->id, [
+            'admin_name' => $adminName,
+            'reason' => $request->reason,
+            'suspended_by' => auth()->user()->name ?? 'System',
+        ]);
 
         return response()->json([
             'success' => true,
+            'message' => "Admin '{$adminName}' has been suspended successfully",
             'data' => [
-                'id' => $admin->id,
-                'name' => $admin->name,
-                'email' => $admin->email,
-                'role' => $admin->role,
-                'is_active' => $admin->is_active,
-                'roles' => $admin->getRoleNames(),
-                'permissions' => $admin->getAllPermissions()->pluck('name'),
-                'last_login_at' => $admin->last_login_at,
-                'created_at' => $admin->created_at,
-                'updated_at' => $admin->updated_at,
+                'is_active' => false,
             ],
         ]);
+
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Failed to suspend admin: ' . $e->getMessage(),
+        ], 500);
     }
-
-    /**
-     * Delete admin (حذف أدمن)
-     * DELETE /api/admin/admins/{admin}
-     */
-    public function destroyAdmin(Admin $admin): JsonResponse
-    {
-        try {
-            $adminName = $admin->name;
-            $adminEmail = $admin->email;
-
-            // ✅ منع حذف الـ Super Admin الوحيد
-            if ($admin->isSuperAdmin()) {
-                $superAdminCount = Admin::where('role', 'super_admin')->count();
-                if ($superAdminCount <= 1) {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Cannot delete the only Super Admin',
-                    ], 400);
-                }
-            }
-
-            // تسجيل النشاط
-            \App\Models\AdminLog::log('delete_admin', 'admin', $admin->id, [
-                'admin_name' => $adminName,
-                'admin_email' => $adminEmail,
-                'deleted_by' => auth()->user()->name ?? 'System',
-            ]);
-
-            // ✅ حذف العلاقات أولاً
-            $admin->syncRoles([]);
-            $admin->syncPermissions([]);
-
-            // حذف سجل الأدمن
-            $admin->delete();
-
-            return response()->json([
-                'success' => true,
-                'message' => "Admin '{$adminName}' deleted successfully",
-            ]);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to delete admin: ' . $e->getMessage(),
-            ], 500);
-        }
-    }
-
-    /**
-     * Suspend admin (تعليق أدمن)
-     * POST /api/admin/admins/{admin}/suspend
-     */
-    public function suspendAdmin(Admin $admin, Request $request): JsonResponse
-    {
-        try {
-            $adminName = $admin->name;
-
-            // ✅ منع تعليق الـ Super Admin الوحيد
-            if ($admin->isSuperAdmin()) {
-                $superAdminCount = Admin::where('role', 'super_admin')->count();
-                if ($superAdminCount <= 1) {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Cannot suspend the only Super Admin',
-                    ], 400);
-                }
-            }
-
-            // تحديث حالة الأدمن في جدول admins (تعطيل)
-            $admin->update([
-                'is_active' => false,
-            ]);
-
-            // تسجيل النشاط
-            \App\Models\AdminLog::log('suspend_admin', 'admin', $admin->id, [
-                'admin_name' => $adminName,
-                'reason' => $request->reason,
-                'suspended_by' => auth()->user()->name ?? 'System',
-            ]);
-
-            return response()->json([
-                'success' => true,
-                'message' => "Admin '{$adminName}' has been suspended successfully",
-                'data' => [
-                    'is_active' => false,
-                ],
-            ]);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to suspend admin: ' . $e->getMessage(),
-            ], 500);
-        }
-    }
+}
 
     /**
      * Activate admin (تفعيل أدمن)
@@ -545,7 +618,6 @@ public function store(CreateAdminRequest $request): JsonResponse
                     'is_active' => true,
                 ],
             ]);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -599,7 +671,6 @@ public function store(CreateAdminRequest $request): JsonResponse
                     'roles' => $admin->getRoleNames(),
                 ],
             ]);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -642,7 +713,6 @@ public function store(CreateAdminRequest $request): JsonResponse
                     'roles' => $admin->getRoleNames(),
                 ],
             ]);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -690,7 +760,6 @@ public function store(CreateAdminRequest $request): JsonResponse
                     'permissions' => $admin->getAllPermissions()->pluck('name'),
                 ],
             ]);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -805,7 +874,6 @@ public function store(CreateAdminRequest $request): JsonResponse
                     'permissions' => $role->permissions()->pluck('name'),
                 ],
             ], 201);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -861,7 +929,6 @@ public function store(CreateAdminRequest $request): JsonResponse
                     'description' => $role->description,
                 ],
             ]);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -902,7 +969,6 @@ public function store(CreateAdminRequest $request): JsonResponse
                 'success' => true,
                 'message' => "Role '{$roleName}' deleted successfully",
             ]);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -971,7 +1037,6 @@ public function store(CreateAdminRequest $request): JsonResponse
                     'permissions' => $role->permissions()->pluck('name'),
                 ],
             ]);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -1048,7 +1113,6 @@ public function store(CreateAdminRequest $request): JsonResponse
                 'message' => 'Permission created successfully',
                 'data' => $permission,
             ], 201);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -1087,7 +1151,6 @@ public function store(CreateAdminRequest $request): JsonResponse
                 'message' => 'Permission updated successfully',
                 'data' => $permission,
             ]);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -1126,7 +1189,6 @@ public function store(CreateAdminRequest $request): JsonResponse
                 'success' => true,
                 'message' => "Permission '{$permissionName}' deleted successfully",
             ]);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -1367,8 +1429,4 @@ public function store(CreateAdminRequest $request): JsonResponse
             ], 500);
         }
     }
-
-
-
-
 }

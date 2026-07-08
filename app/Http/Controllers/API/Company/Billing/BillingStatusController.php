@@ -37,6 +37,17 @@ final class BillingStatusController extends Controller
             }
         }
 
+        // ✅ جلب Limits من الخطة
+        $limits = [];
+        if ($plan) {
+            $limits = [
+                'interviews' => $plan->interviews_limit ?? 0,
+                'jobs' => $plan->jobs_limit ?? 0,
+                'candidates' => $plan->candidates_limit ?? 0,
+                'employees' => $plan->max_employees ?? 1,
+            ];
+        }
+
         return response()->json([
             'success' => true,
             'data' => [
@@ -63,11 +74,13 @@ final class BillingStatusController extends Controller
                     'name' => $plan->name,
                     'slug' => $plan->slug,
                     'description' => $plan->description,
-                    'monthly_price' => $plan->monthly_amount,
-                    'yearly_price' => $plan->yearly_amount,
-                    'currency' => $plan->currency ?? 'usd',
+                    'pricing' => [
+                        'monthly' => $plan->monthly_price ? (float) $plan->monthly_price : 0.00,
+                        'yearly' => $plan->yearly_price ? (float) $plan->yearly_price : 0.00,
+                        'currency' => $plan->currency ?? 'usd',
+                    ],
                     'features' => $plan->features ?? [],
-                    'limits' => $plan->limits ?? [],
+                    'limits' => $limits,
                 ] : null,
                 'stripe_subscription' => $subscription,
             ],

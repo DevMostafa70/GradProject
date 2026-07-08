@@ -11,6 +11,7 @@ use App\Models\CompanyJob;
 use App\Models\CompanyJobCandidate;
 use App\Services\CompanyJobService;
 use App\Imports\ContactsImport;
+use App\Models\Candidate;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -217,82 +218,113 @@ class CompanyJobController extends Controller
         }
     }
 
-    /**
-     * Get job statistics
-     */
-    public function stats(CompanyJob $job): JsonResponse
-    {
-        try {
-            $company = $this->getCompany();
+/**
+ * Get job statistics
+ */
+public function stats(CompanyJob $job): JsonResponse
+{
+    try {
+        $company = $this->getCompany();
 
-            if ($job->company_id !== $company->id) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Unauthorized',
-                ], 403);
-            }
+        if ($job->company_id !== $company->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized',
+            ], 403);
+        }
 
-            $candidates = $job->candidates;
+        // ✅ جلب المرشحين من جدول candidates مباشرة
+        $candidates = Candidate::where('company_job_id', $job->id)->get();
 
-            $stats = [
-                'total_candidates' => $candidates->count(),
-                'completed_interviews' => $candidates->whereNotNull('final_score')->count(),
-                'average_score' => round($candidates->avg('final_score'), 2),
-                'highest_score' => round($candidates->max('final_score'), 2),
-                'status_breakdown' => [
-                    'pending' => $candidates->where('status', 'pending')->count(),
-                    'completed' => $candidates->where('status', 'completed')->count(),
-                    'shortlisted' => $candidates->where('status', 'shortlisted')->count(),
-                    'rejected' => $candidates->where('status', 'rejected')->count(),
-                    'hired' => $candidates->where('status', 'hired')->count(),
-                ],
+        $stats = [
+            'total_candidates' => $candidates->count(),
+            'completed_interviews' => $candidates->whereNotNull('final_score')->count(),
+            'average_score' => $candidates->avg('final_score') ? round($candidates->avg('final_score'), 2) : 0,
+            'highest_score' => $candidates->max('final_score') ? round($candidates->max('final_score'), 2) : 0,
+            'status_breakdown' => [
+                'pending' => $candidates->where('status', 'pending')->count(),
+                'in_progress' => $candidates->where('status', 'in_progress')->count(),
+                'completed' => $candidates->where('status', 'completed')->count(),
+                'shortlisted' => $candidates->where('status', 'shortlisted')->count(),
+                'rejected' => $candidates->where('status', 'rejected')->count(),
+                'hired' => $candidates->where('status', 'hired')->count(),
+            ],
+        ];
+
+        return response()->json([
+            'success' => true,
+            'data' => $stats,
+        ]);
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => $e->getMessage(),
+        ], 500);
+    }
+}
+
+/**
+ * Get ranked candidates for a job
+ */
+public function candidates(CompanyJob $job): JsonResponse
+{
+    try {
+        $company = $this->getCompany();
+
+        if ($job->company_id !== $company->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized',
+            ], 403);
+        }
+
+        // ✅ جلب المرشحين من جدول candidates مباشرة
+        $candidates = Candidate::where('company_job_id', $job->id)
+            ->with(['interview', 'interview.finalReport'])
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        // ✅ تنسيق البيانات
+        $formattedCandidates = $candidates->map(function ($candidate) {
+            $interview = $candidate->interview;
+            $finalReport = $interview?->finalReport;
+
+            return [
+                'id' => $candidate->id,
+                'candidate_id' => $candidate->id,
+                'name' => $candidate->name,
+                'email' => $candidate->email,
+                'phone' => $candidate->phone,
+                'status' => $candidate->status,
+                'final_score' => $candidate->final_score,
+                'source' => null,
+                'company_notes' => null,
+                'invited_at' => $candidate->invited_at?->toISOString(),
+                'started_at' => $candidate->started_at?->toISOString(),
+                'completed_at' => $candidate->completed_at?->toISOString(),
+                'interview_id' => $interview?->id,
+                'strengths' => $finalReport?->strengths_analysis,
+                'weaknesses' => $finalReport?->improvement_areas,
+                'recommendation' => $finalReport?->hiring_recommendation,
+                'created_at' => $candidate->created_at?->toISOString(),
             ];
+        });
 
-            return response()->json([
-                'success' => true,
-                'data' => $stats,
-            ]);
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], 500);
-        }
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'job_title' => $job->title,
+                'total_candidates' => $candidates->count(),
+                'candidates' => $formattedCandidates,
+            ],
+        ]);
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => $e->getMessage(),
+        ], 500);
     }
-
-    /**
-     * Get ranked candidates for a job
-     */
-    public function candidates(CompanyJob $job): JsonResponse
-    {
-        try {
-            $company = $this->getCompany();
-
-            if ($job->company_id !== $company->id) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Unauthorized',
-                ], 403);
-            }
-
-            $candidates = $this->jobService->getRankedCandidates($job);
-
-            return response()->json([
-                'success' => true,
-                'data' => [
-                    'job_title' => $job->title,
-                    'total_candidates' => $candidates->count(),
-                    'candidates' => $candidates,
-                ],
-            ]);
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-            ], 500);
-        }
-    }
-
+}
     /**
      * Get candidate details with full interview results
      */
