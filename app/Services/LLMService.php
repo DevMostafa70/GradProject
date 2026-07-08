@@ -865,27 +865,33 @@ EOT;
     /**
      * Validate and format AI-generated questions
      */
-    private function validateAndFormatQuestions(array $data, int $expectedCount): array
-    {
-        if (!isset($data['questions']) || count($data['questions']) !== $expectedCount) {
-            return $this->getFallbackQuestions(Interview::find(1));
-        }
-
-        $formatted = [];
-        foreach ($data['questions'] as $index => $question) {
-            $formatted[] = [
-                'question_text' => $question['question_text'] ?? 'Please describe your experience with relevant technologies.',
-                'type' => in_array($question['type'] ?? '', ['technical', 'behavioral', 'situational', 'general'])
-                    ? $question['type']
-                    : 'general',
-                'expected_skills' => $question['expected_skills'] ?? [],
-                'evaluation_criteria' => $question['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
-                'order' => $index + 1,
-            ];
-        }
-
-        return $formatted;
+private function validateAndFormatQuestions(array $data, int $expectedCount): array
+{
+    if (!isset($data['questions']) || count($data['questions']) !== $expectedCount) {
+        return $this->getFallbackQuestions(Interview::find(1));
     }
+
+    $formatted = [];
+    foreach ($data['questions'] as $index => $question) {
+        // 🔹 Build the question_text as an array with both languages
+        $questionText = [
+            'en' => $question['question_text'] ?? 'Please describe your experience with relevant technologies.',
+            'ar' => $question['question_text'] ?? 'يرجى وصف خبرتك مع التقنيات ذات الصلة.',
+        ];
+
+        $formatted[] = [
+            'question_text' => $questionText,  // 🔹 Pass array directly - Eloquent will cast to JSON
+            'type' => in_array($question['type'] ?? '', ['technical', 'behavioral', 'situational', 'general'])
+                ? $question['type']
+                : 'general',
+            'expected_skills' => $question['expected_skills'] ?? [],
+            'evaluation_criteria' => $question['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
+            'order' => $index + 1,
+        ];
+    }
+
+    return $formatted;
+}
 
     /**
      * Validate and enrich AI-generated report
@@ -921,31 +927,34 @@ EOT;
     /**
      * Fallback questions if AI fails
      */
-    private function getFallbackQuestions(Interview $interview): array
-    {
-        $questions = [];
-        $skill = $interview->skills[0] ?? 'software development';
+private function getFallbackQuestions(Interview $interview): array
+{
+    $questions = [];
+    $skill = $interview->skills[0] ?? 'software development';
 
-        $templates = [
-            "Tell me about your experience with {$skill}.",
-            "What's the most challenging {$skill} project you've worked on?",
-            "How do you stay updated with the latest developments in {$skill}?",
-            "Describe a time you had to learn a new technology quickly.",
-            "How do you approach problem-solving in {$skill}?"
+    $templates = [
+        "Tell me about your experience with {$skill}.",
+        "What's the most challenging {$skill} project you've worked on?",
+        "How do you stay updated with the latest developments in {$skill}?",
+        "Describe a time you had to learn a new technology quickly.",
+        "How do you approach problem-solving in {$skill}?"
+    ];
+
+    foreach (array_slice($templates, 0, $interview->number_of_questions) as $index => $template) {
+        $questions[] = [
+            'question_text' => [
+                'en' => $template,
+                'ar' => $template,
+            ],
+            'type' => $index < 2 ? 'technical' : 'behavioral',
+            'expected_skills' => [$skill],
+            'evaluation_criteria' => ['clarity', 'depth', 'relevance', 'confidence'],
+            'order' => $index + 1,
         ];
-
-        foreach (array_slice($templates, 0, $interview->number_of_questions) as $index => $template) {
-            $questions[] = [
-                'question_text' => $template,
-                'type' => $index < 2 ? 'technical' : 'behavioral',
-                'expected_skills' => [$skill],
-                'evaluation_criteria' => ['clarity', 'depth', 'relevance', 'confidence'],
-                'order' => $index + 1,
-            ];
-        }
-
-        return $questions;
     }
+
+    return $questions;
+}
 
     /**
      * Fallback report generation

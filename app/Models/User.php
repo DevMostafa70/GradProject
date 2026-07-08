@@ -2,15 +2,18 @@
 
 namespace App\Models;
 
-use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
+use Spatie\Permission\Traits\HasRoles;
+use Spatie\Permission\Models\Permission;
 
 class User extends Authenticatable
 {
-    use HasFactory, Notifiable, HasApiTokens;
+    use HasFactory, Notifiable, HasApiTokens, HasRoles;
+
+    protected $guard_name = 'user';
 
     protected $fillable = [
         'name',
@@ -23,6 +26,8 @@ class User extends Authenticatable
         'last_login_at',
         'is_verified',
         'verified_at',
+        'company_id',
+        'is_company_employee',
     ];
 
     protected $hidden = [
@@ -35,9 +40,39 @@ class User extends Authenticatable
         'password' => 'hashed',
         'is_active' => 'boolean',
         'is_verified' => 'boolean',
+        'is_company_employee' => 'boolean',
+        'company_id' => 'integer',
     ];
 
-    // ==================== العلاقات الأساسية ====================
+    public function getGuardName(): string
+    {
+        if ($this->isCompanyEmployee()) {
+            return 'company';
+        }
+        return 'user';
+    }
+
+    public function setGuardName(): void
+    {
+        $this->guard_name = $this->getGuardName();
+    }
+
+    protected static function booted()
+    {
+        static::retrieved(function ($user) {
+            $user->setGuardName();
+        });
+
+        static::saved(function ($user) {
+            $user->setGuardName();
+        });
+
+        static::created(function ($user) {
+            if ($user->role === 'user' && !$user->isCompanyEmployee()) {
+                $user->assignRole('regular_user');
+            }
+        });
+    }
 
     public function interviews()
     {
@@ -71,11 +106,14 @@ class User extends Authenticatable
         return $this->hasMany(Resume::class, 'user_id');
     }
 
-    // ==================== التحقق من الأدوار ====================
+    public function company()
+    {
+        return $this->belongsTo(Company::class, 'company_id');
+    }
 
     public function isRegularUser(): bool
     {
-        return $this->role === 'user';
+        return $this->role === 'user' && !$this->isCompanyEmployee();
     }
 
     public function isCandidate(): bool
@@ -103,7 +141,58 @@ class User extends Authenticatable
         return $this->is_verified ?? false;
     }
 
-    // ==================== علاقات إضافية ====================
+    public function isCompanyEmployee(): bool
+    {
+        return $this->is_company_employee && $this->company_id !== null;
+    }
+
+    public function isCompanyOwner(): bool
+    {
+        return $this->role === 'company' && $this->company_id !== null;
+    }
+
+    public function getCompanyRole(): ?string
+    {
+        if (!$this->company_id) {
+            return null;
+        }
+
+        try {
+            $roles = $this->getRoleNames();
+            return $roles->first() ?? null;
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
+    public function getCompanyPermissions(): array
+    {
+        if (!$this->isCompanyEmployee()) {
+            return [];
+        }
+
+        try {
+            return $this->getAllPermissions()->pluck('name')->toArray();
+        } catch (\Exception $e) {
+            return [];
+        }
+    }
+
+    public function syncCompanyPermissions(array $permissionNames): void
+    {
+        $permissions = Permission::whereIn('name', $permissionNames)
+            ->where('guard_name', 'user')
+            ->get();
+
+        if ($permissions->isNotEmpty()) {
+            $this->syncPermissions($permissions);
+        }
+    }
+
+    public function hasCompanyPermission(string $permission): bool
+    {
+        return $this->hasPermissionTo($permission, 'user');
+    }
 
     public function adminLogs()
     {

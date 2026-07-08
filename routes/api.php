@@ -11,6 +11,7 @@ use App\Http\Controllers\API\Admin\AdminCompanyController;
 use App\Http\Controllers\API\Admin\AdminController;
 use App\Http\Controllers\API\Admin\AdminSkillController;
 use App\Http\Controllers\API\Admin\AdminUserController;
+use App\Http\Controllers\API\Admin\PermissionTemplateController;
 use App\Http\Controllers\API\AnswerController;
 use App\Http\Controllers\API\AntiCheatController;
 use App\Http\Controllers\Api\Company\Billing\BillingStatusController;
@@ -27,6 +28,9 @@ use App\Http\Controllers\API\ResumeController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\Company\Billing\CheckoutController;
 use App\Http\Controllers\API\Company\Billing\BillingPortalController;
+use App\Http\Controllers\API\Company\CompanyDashboardController;
+use App\Http\Controllers\API\Company\CompanyEmployeeController;
+use App\Http\Controllers\API\Company\CompanyPermissionTemplateController;
 use App\Http\Controllers\API\Webhook\StripeWebhookController;
 
 /*
@@ -78,7 +82,7 @@ Route::post('/stripe/webhook', [StripeWebhookController::class, 'handle'])
 // ==================== Protected Routes (Auth Required) ====================
 
 // ===== User Routes (Regular Users) =====
-Route::prefix('user')->middleware(['auth:sanctum', 'role:user', 'throttle:user'])->group(function () {
+Route::prefix('user')->middleware(['auth:sanctum', 'checkrole:regular_user', 'throttle:user'])->group(function () {
     Route::post('/logout', [UserAuthController::class, 'logout']);
     Route::get('/profile', [UserAuthController::class, 'profile']);
     Route::put('/profile', [UserAuthController::class, 'updateProfile']);
@@ -105,10 +109,10 @@ Route::prefix('user')->middleware(['auth:sanctum', 'role:user', 'throttle:user']
     Route::get('/resume/{resume}/improvements', [ResumeController::class, 'improvements']);
     Route::delete('/resume/{resume}', [ResumeController::class, 'destroy']);
 
-        // ===== Notifications =====
+    // ===== Notifications =====
     Route::get('/notifications', [UserAuthController::class, 'notifications']);
     Route::put('/notifications/{id}/read', [UserAuthController::class, 'markNotificationAsRead']);
-     Route::delete('/notifications', [UserAuthController::class, 'deleteAllNotifications']);
+    Route::delete('/notifications', [UserAuthController::class, 'deleteAllNotifications']);
     Route::delete('/notifications/{id}', [UserAuthController::class, 'deleteNotification']);
 });
 
@@ -117,191 +121,462 @@ Route::prefix('user')->middleware(['auth:sanctum', 'role:user', 'throttle:user']
 //     ... باقي Routes معلقة ...
 // });
 
-// ===== Company Routes (Auth + Role) =====
-Route::prefix('company')->middleware(['auth:sanctum', 'role:company'])->group(function () {
+// ============================================================
+// 🔹 Company Routes
+// ============================================================
+Route::prefix('company')
+    ->middleware([
+        'auth:sanctum',
+        'checkrole:company_owner,company_hr,company_interviewer,company_recruiter,company_question_bank_manager,company_viewer,company_employee'
+    ])
+    ->group(function () {
 
-    // ===== Routes لا تحتاج اشتراك فعال =====
-    Route::post('/logout', [CompanyAuthController::class, 'logout']);
-    Route::get('/profile', [CompanyAuthController::class, 'profile']);
-    Route::post('/profile', [CompanyAuthController::class, 'updateProfile']);
+        // ============================================================
+        // ✅ Company Dashboard
+        // ============================================================
+       // ✅ Company Dashboard
+        Route::get('/dashboard', [CompanyDashboardController::class, 'index'])
+            ->middleware('checkpermission:company.dashboard.view');
 
-        // ===== Notifications =====
-    Route::get('/notifications', [CompanyAuthController::class, 'notifications']);
-    Route::put('/notifications/{id}/read', [CompanyAuthController::class, 'markNotificationAsRead']);
-     Route::delete('/notifications', [CompanyAuthController::class, 'deleteAllNotifications']); 
-    Route::delete('/notifications/{id}', [CompanyAuthController::class, 'deleteNotification']);
+        // ============================================================
+        // ✅ Company Employee Management (فقط company_owner)
+        // ============================================================
+        Route::prefix('employees')
+            ->middleware('checkrole:company_owner')
+            ->group(function () {
+                Route::get('/', [CompanyEmployeeController::class, 'index'])
+                    ->middleware('checkpermission:company.employees.view');
 
-    // ===== Billing Routes =====
-    Route::prefix('billing')->group(function () {
-        Route::get('/status', [BillingStatusController::class, 'show'])
-            ->middleware('company.authenticated');
+                Route::post('/', [CompanyEmployeeController::class, 'store'])
+                    ->middleware('checkpermission:company.employees.create');
 
-        Route::post('/select-plan', [SelectPlanController::class, 'store'])
-            ->middleware(['company.authenticated', 'company.approved']);
+                Route::get('/{employee}', [CompanyEmployeeController::class, 'show'])
+                    ->middleware('checkpermission:company.employees.view');
 
-        Route::post('/checkout', [CheckoutController::class, 'store'])
-            ->middleware(['company.authenticated', 'company.approved']);
+                Route::put('/{employee}', [CompanyEmployeeController::class, 'update'])
+                    ->middleware('checkpermission:company.employees.update');
 
-        Route::post('/portal', [BillingPortalController::class, 'store'])
-            ->middleware(['company.authenticated']);
+                Route::delete('/{employee}', [CompanyEmployeeController::class, 'destroy'])
+                    ->middleware('checkpermission:company.employees.delete');
+
+                Route::post('/{employee}/toggle', [CompanyEmployeeController::class, 'toggleStatus'])
+                    ->middleware('checkpermission:company.employees.update');
+            });
+
+        // ============================================================
+        // ✅ Company Permission Templates (فقط company_owner)
+        // ============================================================
+        Route::prefix('permission-templates')
+            ->middleware(['checkrole:company_owner', 'company.paid'])
+            ->group(function () {
+                Route::get('/', [CompanyPermissionTemplateController::class, 'index'])
+                    ->middleware('checkpermission:company.employees.view');
+
+                Route::post('/', [CompanyPermissionTemplateController::class, 'store'])
+                    ->middleware('checkpermission:company.employees.create');
+
+                Route::get('/available-permissions', [CompanyPermissionTemplateController::class, 'availablePermissions'])
+                    ->middleware('checkpermission:company.employees.view');
+
+                Route::get('/permissions-by-module', [CompanyPermissionTemplateController::class, 'permissionsByModule'])
+                    ->middleware('checkpermission:company.employees.view');
+
+                Route::get('/{template}', [CompanyPermissionTemplateController::class, 'show'])
+                    ->middleware('checkpermission:company.employees.view');
+
+                Route::put('/{template}', [CompanyPermissionTemplateController::class, 'update'])
+                    ->middleware('checkpermission:company.employees.update');
+
+                Route::delete('/{template}', [CompanyPermissionTemplateController::class, 'destroy'])
+                    ->middleware('checkpermission:company.employees.delete');
+
+                Route::post('/{template}/toggle', [CompanyPermissionTemplateController::class, 'toggle'])
+                    ->middleware('checkpermission:company.employees.update');
+            });
+
+        // ============================================================
+        // ✅ Employee Limits (فقط company_owner)
+        // ============================================================
+        Route::get('/employee-limits', [CompanyEmployeeController::class, 'limits'])
+            ->middleware(['checkrole:company_owner', 'checkpermission:company.employees.view']);
+
+        // ============================================================
+        // ✅ Routes المشتركة (لا تحتاج اشتراك فعال)
+        // ============================================================
+
+        Route::post('/logout', [CompanyAuthController::class, 'logout'])
+            ->middleware('checkpermission:company.profile.view');
+
+        Route::get('/profile', [CompanyAuthController::class, 'profile'])
+            ->middleware('checkpermission:company.profile.view');
+
+        Route::post('/profile', [CompanyAuthController::class, 'updateProfile'])
+            ->middleware('checkpermission:company.profile.update');
+
+        // ============================================================
+        // ✅ Notifications
+        // ============================================================
+        Route::get('/notifications', [CompanyAuthController::class, 'notifications'])
+            ->middleware('checkpermission:company.notifications.view');
+
+        Route::put('/notifications/{id}/read', [CompanyAuthController::class, 'markNotificationAsRead'])
+            ->middleware('checkpermission:company.notifications.view');
+
+        Route::delete('/notifications', [CompanyAuthController::class, 'deleteAllNotifications'])
+            ->middleware('checkpermission:company.notifications.view');
+
+        Route::delete('/notifications/{id}', [CompanyAuthController::class, 'deleteNotification'])
+            ->middleware('checkpermission:company.notifications.view');
+
+        // ============================================================
+        // ✅ Billing Routes
+        // ============================================================
+        Route::prefix('billing')->group(function () {
+            Route::get('/status', [BillingStatusController::class, 'show'])
+                ->middleware(['company.authenticated', 'checkpermission:company.billing.view']);
+
+            Route::post('/select-plan', [SelectPlanController::class, 'store'])
+                ->middleware(['company.authenticated', 'company.approved', 'checkpermission:company.billing.select_plan']);
+
+            Route::post('/checkout', [CheckoutController::class, 'store'])
+                ->middleware(['company.authenticated', 'company.approved', 'checkpermission:company.billing.checkout']);
+
+            Route::post('/portal', [BillingPortalController::class, 'store'])
+                ->middleware(['company.authenticated', 'checkpermission:company.billing.portal']);
+        });
+
+        // ============================================================
+        // ✅ Routes تحتاج اشتراك فعال (company.paid)
+        // ============================================================
+        Route::middleware(['company.paid'])->group(function () {
+
+            // Job Management
+            Route::apiResource('jobs', CompanyJobController::class)->only(['index', 'store', 'show'])
+                ->middleware('checkpermission:company.jobs.view');
+
+            Route::post('/jobs/{job}/close', [CompanyJobController::class, 'close'])
+                ->middleware('checkpermission:company.jobs.close');
+
+            Route::get('/jobs/{job}/stats', [CompanyJobController::class, 'stats'])
+                ->middleware('checkpermission:company.jobs.view');
+
+            Route::get('/jobs/{job}/candidates', [CompanyJobController::class, 'candidates'])
+                ->middleware('checkpermission:company.candidates.view');
+
+            Route::get('/jobs/{job}/candidates/{candidate}', [CompanyJobController::class, 'candidateDetails'])
+                ->middleware('checkpermission:company.candidates.view');
+
+            Route::put('/jobs/{job}/candidates/{candidate}/status', [CompanyJobController::class, 'updateCandidateStatus'])
+                ->middleware('checkpermission:company.candidates.update');
+
+            // Bulk invitations
+            Route::post('/jobs/{job}/invite-bulk', [CompanyJobController::class, 'inviteBulk'])
+                ->middleware('checkpermission:company.candidates.invite');
+
+            Route::get('/jobs/{job}/invitation-stats', [CompanyJobController::class, 'invitationStats'])
+                ->middleware('checkpermission:company.candidates.view');
+
+            Route::get('/jobs/{job}/invitations', [CompanyJobController::class, 'invitations'])
+                ->middleware('checkpermission:company.candidates.view');
+
+            // Question Bank
+            Route::post('/jobs/{job}/upload-questions', [CompanyJobController::class, 'uploadQuestions'])
+                ->middleware('checkpermission:company.question_bank.create');
+
+            Route::get('/jobs/{job}/question-stats', [CompanyJobController::class, 'questionStats'])
+                ->middleware('checkpermission:company.question_bank.view');
+
+            Route::get('/jobs/{job}/question-bank', [CompanyJobController::class, 'getQuestionBank'])
+                ->middleware('checkpermission:company.question_bank.view');
+        });
     });
 
-    // ===== Routes تحتاج اشتراك فعال (company.paid) =====
-    Route::middleware(['company.paid'])->group(function () {
-        // Job Management
-        Route::apiResource('jobs', CompanyJobController::class)->only(['index', 'store', 'show']);
-        Route::post('/jobs/{job}/close', [CompanyJobController::class, 'close']);
-        Route::get('/jobs/{job}/stats', [CompanyJobController::class, 'stats']);
-        Route::get('/jobs/{job}/candidates', [CompanyJobController::class, 'candidates']);
-        Route::get('/jobs/{job}/candidates/{candidate}', [CompanyJobController::class, 'candidateDetails']);
-        Route::put('/jobs/{job}/candidates/{candidate}/status', [CompanyJobController::class, 'updateCandidateStatus']);
+// ============================================================
+// 🔹 Admin Routes
+// ============================================================
+Route::prefix('admin')
+    ->middleware(['auth:sanctum', 'checkrole:admin,super_admin'])
+    ->group(function () {
 
-        // Bulk invitations
-        Route::post('/jobs/{job}/invite-bulk', [CompanyJobController::class, 'inviteBulk']);
-        Route::get('/jobs/{job}/invitation-stats', [CompanyJobController::class, 'invitationStats']);
-        Route::get('/jobs/{job}/invitations', [CompanyJobController::class, 'invitations']);
+        Route::post('/logout', [AdminAuthController::class, 'logout']);
+        Route::get('/profile', [AdminAuthController::class, 'profile']);
 
-        // Question Bank
-        Route::post('/jobs/{job}/upload-questions', [CompanyJobController::class, 'uploadQuestions']);
-        Route::get('/jobs/{job}/question-stats', [CompanyJobController::class, 'questionStats']);
-        Route::get('/jobs/{job}/question-bank', [CompanyJobController::class, 'getQuestionBank']);
+        // ===== Dashboard =====
+        Route::get('/dashboard', [AdminController::class, 'dashboard'])
+            ->middleware('checkpermission:admin.dashboard.view');
+
+        // ============================================================
+        // 🔹 Permission Templates - فقط super_admin
+        // ============================================================
+        Route::prefix('permission-templates')
+            ->middleware('checkrole:super_admin')
+            ->group(function () {
+
+                // ✅ 1. Routes الثابتة (بدون {id}) تأتي أولاً
+                Route::get('/available-permissions', [PermissionTemplateController::class, 'availablePermissions']);
+
+                // ✅ 2. Routes المتغيرة (مع {id}) تأتي بعدها
+                Route::get('/', [PermissionTemplateController::class, 'index']);
+                Route::post('/', [PermissionTemplateController::class, 'store']);
+                Route::get('/{template}', [PermissionTemplateController::class, 'show']);
+                Route::put('/{template}', [PermissionTemplateController::class, 'update']);
+                Route::delete('/{template}', [PermissionTemplateController::class, 'destroy']);
+                Route::post('/{template}/toggle', [PermissionTemplateController::class, 'toggle']);
+            });
+
+        // ============================================================
+        // ✅ Users Management
+        // ============================================================
+        Route::prefix('users')->group(function () {
+            Route::get('/', [AdminUserController::class, 'index'])
+                ->middleware('checkpermission:admin.users.view');
+
+            Route::get('/{user}', [AdminUserController::class, 'show'])
+                ->middleware('checkpermission:admin.users.view');
+
+            Route::post('/', [AdminUserController::class, 'store'])
+                ->middleware('checkpermission:admin.users.create');
+
+            Route::put('/{user}', [AdminUserController::class, 'update'])
+                ->middleware('checkpermission:admin.users.update');
+
+            Route::post('/{user}/suspend', [AdminUserController::class, 'suspendUser'])
+                ->middleware('checkpermission:admin.users.suspend');
+
+            Route::post('/{user}/activate', [AdminUserController::class, 'activateUser'])
+                ->middleware('checkpermission:admin.users.update');
+
+            Route::delete('/{user}', [AdminUserController::class, 'deleteUser'])
+                ->middleware('checkrole:super_admin');
+        });
+
+        // ============================================================
+        // ✅ Companies Management
+        // ============================================================
+        Route::prefix('companies')->group(function () {
+            Route::get('/pending', [AdminCompanyController::class, 'pendingRequests'])
+                ->middleware('checkpermission:admin.companies.view');
+
+            Route::post('/{company}/approve', [AdminCompanyController::class, 'approve'])
+                ->middleware('checkpermission:admin.companies.approve');
+
+            Route::post('/{company}/reject', [AdminCompanyController::class, 'reject'])
+                ->middleware('checkpermission:admin.companies.reject');
+
+            Route::post('/{company}/suspend', [AdminCompanyController::class, 'suspend'])
+                ->middleware('checkpermission:admin.companies.suspend');
+
+            Route::post('/{company}/activate', [AdminCompanyController::class, 'activate'])
+                ->middleware('checkpermission:admin.companies.update');
+
+            Route::delete('/{company}', [AdminCompanyController::class, 'destroy'])
+                ->middleware('checkpermission:admin.companies.delete');
+
+            Route::get('/', [AdminCompanyController::class, 'index'])
+                ->middleware('checkpermission:admin.companies.view');
+        });
+
+        // ============================================================
+        // ✅ Candidates Management
+        // ============================================================
+        Route::prefix('candidates')->group(function () {
+            Route::get('/', [AdminUserController::class, 'candidatesList'])
+                ->middleware('checkpermission:admin.users.view');
+
+            Route::get('/{candidate}', [AdminUserController::class, 'showCandidate'])
+                ->middleware('checkpermission:admin.users.view');
+
+            Route::delete('/{candidate}', [AdminUserController::class, 'deleteCandidate'])
+                ->middleware('checkrole:super_admin');
+        });
+
+        Route::get('/companies/{company}/candidates', [AdminUserController::class, 'companyCandidates'])
+            ->middleware('checkpermission:admin.users.view');
+
+        // ============================================================
+        // ✅ Skills Management
+        // ============================================================
+        // Route::get('/skills', [AdminSkillController::class, 'index'])
+        //     ->middleware('checkpermission:admin.skills.view');
+
+        // Route::post('/skills', [AdminSkillController::class, 'store'])
+        //     ->middleware('checkpermission:admin.skills.create');
+
+        // Route::put('/skills/{skill}', [AdminSkillController::class, 'update'])
+        //     ->middleware('checkpermission:admin.skills.update');
+
+        // Route::delete('/skills/{skill}', [AdminSkillController::class, 'destroy'])
+        //     ->middleware('checkpermission:admin.skills.delete');
+
+        // Route::post('/skills/{skill}/toggle', [AdminSkillController::class, 'toggle'])
+        //     ->middleware('checkpermission:admin.skills.update');
+
+        // ============================================================
+        // ✅ Categories Management
+        // ============================================================
+        // Route::get('/categories', [AdminCategoryController::class, 'index'])
+        //     ->middleware('checkpermission:admin.categories.view');
+
+        // Route::post('/categories', [AdminCategoryController::class, 'store'])
+        //     ->middleware('checkpermission:admin.categories.create');
+
+        // Route::put('/categories/{category}', [AdminCategoryController::class, 'update'])
+        //     ->middleware('checkpermission:admin.categories.update');
+
+        // Route::delete('/categories/{category}', [AdminCategoryController::class, 'destroy'])
+        //     ->middleware('checkpermission:admin.categories.delete');
+
+        // Route::post('/categories/reorder', [AdminCategoryController::class, 'reorder'])
+        //     ->middleware('checkpermission:admin.categories.update');
+
+        // Route::post('/categories/{category}/toggle', [AdminCategoryController::class, 'toggle'])
+        //     ->middleware('checkpermission:admin.categories.update');
+
+        // ============================================================
+        // ✅ Broadcast Notifications - فقط super_admin
+        // ============================================================
+        Route::prefix('broadcast')
+            ->middleware('checkrole:super_admin')
+            ->group(function () {
+                Route::post('/send', [AdminBroadcastController::class, 'send'])->middleware('throttle:5,10');
+                Route::get('/', [AdminBroadcastController::class, 'index']);
+                Route::get('/{broadcast}', [AdminBroadcastController::class, 'show']);
+                Route::delete('/{broadcast}', [AdminBroadcastController::class, 'destroy']);
+                Route::delete('/', [AdminBroadcastController::class, 'destroyAll']);
+            });
+
+        // ============================================================
+        // ✅ Activity Logs - فقط super_admin
+        // ============================================================
+        Route::prefix('activity-logs')
+            ->middleware('checkrole:super_admin')
+            ->group(function () {
+                Route::get('/', [AdminActivityLogController::class, 'index']);
+                Route::get('/stats', [AdminActivityLogController::class, 'stats']);
+                Route::get('/{id}', [AdminActivityLogController::class, 'show']);
+                Route::delete('/clean', [AdminActivityLogController::class, 'clean']);
+            });
+
+        // ============================================================
+        // ✅ Backup Routes - فقط super_admin
+        // ============================================================
+        Route::prefix('backups')
+            ->middleware('checkrole:super_admin')
+            ->group(function () {
+                Route::get('/', [AdminController::class, 'backups']);
+                Route::post('/', [AdminController::class, 'createBackup']);
+                Route::get('/stats', [AdminController::class, 'backupStats']);
+                Route::get('/{backup}/download', [AdminController::class, 'downloadBackup']);
+                Route::delete('/{backup}', [AdminController::class, 'deleteBackup']);
+            });
+
+        // ============================================================
+        // 🔹 Admin Management - فقط super_admin
+        // ============================================================
+        Route::prefix('admins')
+            ->middleware('checkrole:super_admin')
+            ->group(function () {
+                Route::get('/', [AdminUserController::class, 'adminsList']);
+                Route::post('/', [AdminUserController::class, 'store']);
+                Route::get('/{admin}', [AdminUserController::class, 'showAdmin']);
+                Route::delete('/{admin}', [AdminUserController::class, 'destroyAdmin']);
+                Route::post('/{admin}/suspend', [AdminUserController::class, 'suspendAdmin']);
+                Route::post('/{admin}/activate', [AdminUserController::class, 'activateAdmin']);
+                Route::post('/{admin}/roles', [AdminUserController::class, 'assignRole']);
+                Route::delete('/{admin}/roles/{role}', [AdminUserController::class, 'removeRole']);
+                Route::post('/{admin}/permissions', [AdminUserController::class, 'syncPermissions']);
+                Route::get('/{admin}/permissions', [AdminUserController::class, 'getPermissions']);
+            });
+
+        // ============================================================
+        // 🔹 Roles Management - فقط super_admin
+        // ============================================================
+        Route::prefix('roles')
+            ->middleware('checkrole:super_admin')
+            ->group(function () {
+                Route::get('/', [AdminUserController::class, 'getAllRoles']);
+                Route::post('/', [AdminUserController::class, 'createRole']);
+                Route::put('/{role}', [AdminUserController::class, 'updateRole']);
+                Route::delete('/{role}', [AdminUserController::class, 'deleteRole']);
+                Route::get('/{role}/permissions', [AdminUserController::class, 'getRolePermissions']);
+                Route::post('/{role}/permissions', [AdminUserController::class, 'syncRolePermissions']);
+            });
+
+        // ============================================================
+        // 🔹 Permissions Management - فقط super_admin
+        // ============================================================
+        Route::prefix('permissions')
+            ->middleware('checkrole:super_admin')
+            ->group(function () {
+                Route::get('/', [AdminUserController::class, 'getAllPermissions']);
+                Route::post('/', [AdminUserController::class, 'createPermission']);
+                Route::put('/{permission}', [AdminUserController::class, 'updatePermission']);
+                Route::delete('/{permission}', [AdminUserController::class, 'deletePermission']);
+            });
     });
-});
-
-// ===== Admin Routes =====
-Route::prefix('admin')->middleware(['auth:sanctum', 'role:admin,super_admin', 'throttle:admin'])->group(function () {
-    Route::post('/logout', [AdminAuthController::class, 'logout']);
-    Route::get('/profile', [AdminAuthController::class, 'profile']);
-
-    // Dashboard
-    Route::get('/dashboard', [AdminController::class, 'dashboard']);
-    Route::get('/logs', [AdminController::class, 'logs']);
-
-    // Users Management (Regular Users)
-    Route::get('/users', [AdminUserController::class, 'index']);
-    Route::get('/users/{user}', [AdminUserController::class, 'show']);
-    Route::post('/users/{user}/suspend', [AdminUserController::class, 'suspendUser']);
-    Route::post('/users/{user}/activate', [AdminUserController::class, 'activateUser']);
-    Route::delete('/users/{user}', [AdminUserController::class, 'deleteUser']);
-
-    // Candidates Management
-    Route::get('/candidates', [AdminUserController::class, 'candidatesList']);
-    Route::get('/candidates/{candidate}', [AdminUserController::class, 'showCandidate']);
-    Route::delete('/candidates/{candidate}', [AdminUserController::class, 'deleteCandidate']);
-    Route::get('/companies/{company}/candidates', [AdminUserController::class, 'companyCandidates']);
-
-    // Admins Management
-    Route::get('/admins', [AdminUserController::class, 'adminsList']);
-    Route::post('/admins', [AdminUserController::class, 'store'])->middleware('auth:sanctum');
-    Route::get('/admins/{admin}', [AdminUserController::class, 'showAdmin']);
-    Route::delete('/admins/{admin}', [AdminUserController::class, 'destroyAdmin']);
-    Route::post('/admins/{admin}/suspend', [AdminUserController::class, 'suspendAdmin']);
-    Route::post('/admins/{admin}/activate', [AdminUserController::class, 'activateAdmin']);
-
-    // Companies Management
-    Route::get('/companies/pending', [AdminCompanyController::class, 'pendingRequests']);
-    Route::post('/companies/{company}/approve', [AdminCompanyController::class, 'approve']);
-    Route::post('/companies/{company}/reject', [AdminCompanyController::class, 'reject']);
-    Route::post('/companies/{company}/suspend', [AdminCompanyController::class, 'suspend']);
-    Route::post('/companies/{company}/activate', [AdminCompanyController::class, 'activate']);
-    Route::delete('/companies/{company}', [AdminCompanyController::class, 'destroy']);
-    Route::get('/companies', [AdminCompanyController::class, 'index']);
-
-    // Skills Management
-    Route::apiResource('skills', AdminSkillController::class);
-    Route::post('/skills/{skill}/toggle', [AdminSkillController::class, 'toggle']);
-
-    // Categories Management
-    Route::apiResource('categories', AdminCategoryController::class);
-    Route::post('/categories/reorder', [AdminCategoryController::class, 'reorder']);
-    Route::post('/categories/{category}/toggle', [AdminCategoryController::class, 'toggle']);
-
-    // Broadcast Notifications
-    Route::post('/broadcast/send', [AdminBroadcastController::class, 'send'])->middleware('throttle:5,10');
-    Route::get('/broadcast', [AdminBroadcastController::class, 'index']);
-    Route::get('/broadcast/{broadcast}', [AdminBroadcastController::class, 'show']);
-    Route::delete('/broadcast/{broadcast}', [AdminBroadcastController::class, 'destroy']);
-    Route::delete('/broadcast', [AdminBroadcastController::class, 'destroyAll']);
-
-    // ===== Activity Logs =====
-    Route::get('/activity-logs', [AdminActivityLogController::class, 'index']);
-    Route::get('/activity-logs/stats', [AdminActivityLogController::class, 'stats']);
-    Route::get('/activity-logs/{id}', [AdminActivityLogController::class, 'show']);
-    Route::delete('/activity-logs/clean', [AdminActivityLogController::class, 'clean']);
-
-
-    // 🔹 NEW: Backup Routes
-
-    Route::prefix('backups')->group(function () {
-        Route::get('/', [AdminController::class, 'backups']);
-        Route::post('/', [AdminController::class, 'createBackup']);
-        Route::get('/stats', [AdminController::class, 'backupStats']);
-        Route::get('/{backup}/download', [AdminController::class, 'downloadBackup']);
-        Route::delete('/{backup}', [AdminController::class, 'deleteBackup']);
-
-});
 
 // ============================================================
 // 🔹 Interview Routes (for regular users - practice)
 // ============================================================
-Route::middleware(['auth:sanctum', 'role:user'])->group(function () {
+Route::middleware(['auth:sanctum', 'role:regular_user'])->group(function () {
     // ===== Interviews =====
     Route::apiResource('interviews', InterviewController::class)->except(['update', 'destroy'])
-        ->middleware('throttle:start-interview'); // 🔹 NEW: حد لبدء المقابلات
+        ->middleware(['throttle:start-interview', 'permission:user.interviews.start']);
 
     Route::post('/interviews/{interview}/complete', [InterviewController::class, 'complete'])
-        ->middleware('throttle:complete-interview'); // 🔹 NEW
+        ->middleware(['throttle:complete-interview', 'permission:user.interviews.complete']);
 
     Route::get('/interviews/{interview}/status', [InterviewController::class, 'checkFinalStatus'])
-        ->middleware('throttle:session-status'); // 🔹 NEW
+        ->middleware(['throttle:session-status', 'permission:user.interviews.view']);
 
     Route::get('/interviews/{interview}/report', [InterviewController::class, 'getFinalReport'])
-        ->middleware('throttle:get-report'); // 🔹 NEW
+        ->middleware(['throttle:get-report', 'permission:user.results.view']);
 
     Route::get('/interviews/{interview}/report-ready', [InterviewController::class, 'checkReportReady'])
-        ->middleware('throttle:check-report'); // 🔹 NEW
+        ->middleware(['throttle:check-report', 'permission:user.interviews.view']);
 
     // ===== Session Management =====
     Route::get('/interviews/{interview}/session', [InterviewController::class, 'sessionStatus'])
-        ->middleware('throttle:session-status'); // 🔹 NEW
+        ->middleware(['throttle:session-status', 'permission:user.interviews.view']);
 
     Route::get('/interviews/resume/{token}', [InterviewController::class, 'resumeByToken'])
-        ->middleware('throttle:resume-interview'); // 🔹 NEW
+        ->middleware(['throttle:resume-interview', 'permission:user.interviews.resume']);
 
     // ===== Resume Interview =====
     Route::get('/interviews/{interview}/resume', [InterviewController::class, 'resume'])
-        ->middleware('throttle:resume-interview'); // 🔹 NEW
+        ->middleware(['throttle:resume-interview', 'permission:user.interviews.resume']);
 
     Route::get('/interviews/{interview}/can-resume', [InterviewController::class, 'canResume'])
-        ->middleware('throttle:session-status'); // 🔹 NEW
+        ->middleware(['throttle:session-status', 'permission:user.interviews.view']);
 
     // ===== Tab Lock =====
     Route::get('/interviews/{interview}/lock-status', [InterviewController::class, 'lockStatus'])
-        ->middleware('throttle:interview-lock'); // 🔹 NEW
+        ->middleware(['throttle:interview-lock', 'permission:user.interviews.view']);
 
     Route::post('/interviews/{interview}/lock', [InterviewController::class, 'lock'])
-        ->middleware('throttle:interview-lock'); // 🔹 NEW
+        ->middleware(['throttle:interview-lock', 'permission:user.interviews.start']);
 
     Route::post('/interviews/{interview}/unlock', [InterviewController::class, 'unlock'])
-        ->middleware('throttle:interview-lock'); // 🔹 NEW
+        ->middleware(['throttle:interview-lock', 'permission:user.interviews.start']);
 
     Route::post('/interviews/{interview}/refresh-lock', [InterviewController::class, 'refreshLock'])
-        ->middleware('throttle:refresh-lock'); // 🔹 NEW
+        ->middleware(['throttle:refresh-lock', 'permission:user.interviews.start']);
 
     // ===== Answers =====
     Route::post('/answers', [AnswerController::class, 'store'])
-        ->middleware('throttle:submit-answer'); // 🔹 NEW
+        ->middleware(['throttle:submit-answer', 'permission:user.answers.submit']);
 
-    Route::get('/answers/{answer}', [AnswerController::class, 'show']);
+    Route::get('/answers/{answer}', [AnswerController::class, 'show'])
+        ->middleware('permission:user.interviews.view');
 
     // ===== Anti-cheat =====
     Route::post('/anti-cheat/violations', [AntiCheatController::class, 'store'])
-        ->middleware('throttle:anti-cheat'); // 🔹 NEW
+        ->middleware(['throttle:anti-cheat', 'permission:user.answers.submit']);
 
-    Route::get('/interviews/{interview}/violations', [AntiCheatController::class, 'index']);
+    Route::get('/interviews/{interview}/violations', [AntiCheatController::class, 'index'])
+        ->middleware('permission:user.interviews.view');
 
     // ===== Interview Answer AI Analysis =====
     Route::post('/analyze-answer', [InterviewAnalysisController::class, 'analyze'])
-        ->middleware('throttle:submit-answer'); // 🔹 NEW
-});
+        ->middleware(['throttle:submit-answer', 'permission:user.answers.submit']);
 });

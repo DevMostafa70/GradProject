@@ -3,20 +3,28 @@
 namespace App\Http\Requests\Company;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Http\Exceptions\HttpResponseException;
 
 class CreateJobRequest extends FormRequest
 {
     public function authorize(): bool
-{
-    $company = auth()->user();
+    {
+        $user = auth()->user();
 
-    if (!$company) {
+        if (!$user) {
+            return false;
+        }
+
+        if ($user instanceof \App\Models\Company) {
+            return true;
+        }
+
+        if ($user instanceof \App\Models\User && $user->isCompanyEmployee()) {
+            return $user->hasPermissionTo('company.jobs.create');
+        }
+
         return false;
     }
-
-    // التحقق من أن الكائن هو من نوع Company
-    return $company instanceof \App\Models\Company;
-}
 
     public function rules(): array
     {
@@ -57,5 +65,24 @@ class CreateJobRequest extends FormRequest
             'questions_file.mimes' => 'Questions file must be Excel or CSV format.',
             'questions_file.max' => 'Questions file cannot exceed 10MB.',
         ];
+    }
+
+    /**
+     * Handle a failed authorization attempt.
+     */
+    protected function failedAuthorization(): void
+    {
+        $user = auth()->user();
+        $permissions = $user ? $user->getAllPermissions()->pluck('name')->toArray() : [];
+
+        // ✅ استخدام HttpResponseException بدلاً من abort
+        throw new HttpResponseException(
+            response()->json([
+                'success' => false,
+                'message' => 'Unauthorized. You do not have the required permission.',
+                'required_permissions' => ['company.jobs.create'],
+                'your_permissions' => $permissions,
+            ], 403)
+        );
     }
 }

@@ -11,109 +11,152 @@ use Illuminate\Support\Facades\Validator;
 
 class UserAuthController extends Controller
 {
-    /**
-     * Register a new regular user
-     * POST /api/user/register
-     */
-    public function register(Request $request): JsonResponse
-    {
-        $validator = Validator::make($request->all(), [
-            'name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255|unique:users',
-            'password' => 'required|string|min:6|confirmed',
-        ]);
+/**
+ * Register a new regular user
+ * POST /api/user/register
+ */
+public function register(Request $request): JsonResponse
+{
+    $validator = Validator::make($request->all(), [
+        'name' => 'required|string|max:255',
+        'email' => 'required|string|email|max:255|unique:users,email',
+        'password' => 'required|string|min:6|confirmed',
+    ]);
 
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        $user = User::create([
-            'name' => $request->name,
-            'email' => $request->email,
-            'password' => Hash::make($request->password),
-            'role' => 'user',
-            'is_active' => true,
-        ]);
-
-        $token = $user->createToken('user-token')->plainTextToken;
-
+    if ($validator->fails()) {
         return response()->json([
-            'success' => true,
-            'message' => 'Registration successful',
-            'data' => [
-                'user' => [
-                    'id' => $user->id,
-                    'name' => $user->name,
-                    'email' => $user->email,
-                    'role' => $user->role,
-                ],
-                'token' => $token,
-                'token_type' => 'Bearer',
-            ],
-        ], 201);
+            'success' => false,
+            'errors' => $validator->errors()
+        ], 422);
     }
 
-    /**
-     * Login regular user
-     * POST /api/user/login
-     */
-    public function login(Request $request): JsonResponse
-    {
-        $validator = Validator::make($request->all(), [
-            'email' => 'required|email',
-            'password' => 'required|string',
-        ]);
+    // ✅ منع تسجيل مستخدم عادي ببريد موظف
+    $existingEmployee = User::where('email', $request->email)
+        ->where('is_company_employee', true)
+        ->exists();
 
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        $user = User::where('email', $request->email)
-            ->where('role', 'user')
-            ->first();
-
-        if (!$user || !Hash::check($request->password, $user->password)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid credentials',
-            ], 401);
-        }
-
-        if (!$user->is_active) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Your account has been suspended. Please contact support.',
-            ], 403);
-        }
-
-        // حذف التوكنات القديمة
-        $user->tokens()->delete();
-
-        $token = $user->createToken('user-token')->plainTextToken;
-
+    if ($existingEmployee) {
         return response()->json([
-            'success' => true,
-            'message' => 'Login successful',
-            'data' => [
-                'user' => [
-                    'id' => $user->id,
-                    'name' => $user->name,
-                    'email' => $user->email,
-                    'role' => $user->role,
-                    'avatar' => $user->avatar,
-                    'bio' => $user->bio,
-                ],
-                'token' => $token,
-                'token_type' => 'Bearer',
-            ],
-        ]);
+            'success' => false,
+            'message' => 'This email is already registered as a company employee.',
+        ], 422);
     }
+
+    $user = User::create([
+        'name' => $request->name,
+        'email' => $request->email,
+        'password' => Hash::make($request->password),
+        'role' => 'user',
+        'is_active' => true,
+        'is_company_employee' => false,
+        'company_id' => null,
+    ]);
+
+    $token = $user->createToken('user-token')->plainTextToken;
+
+    return response()->json([
+        'success' => true,
+        'message' => 'Registration successful',
+        'data' => [
+            'user' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'role' => $user->role,
+            ],
+            'token' => $token,
+            'token_type' => 'Bearer',
+        ],
+    ], 201);
+}
+
+/**
+ * Login regular user
+ * POST /api/user/login
+ */
+public function login(Request $request): JsonResponse
+{
+    $validator = Validator::make($request->all(), [
+        'email' => 'required|email',
+        'password' => 'required|string',
+    ]);
+
+    if ($validator->fails()) {
+        return response()->json([
+            'success' => false,
+            'errors' => $validator->errors()
+        ], 422);
+    }
+
+    // ✅ 1. البحث عن المستخدم أولاً (بدون استثناء)
+    $user = User::where('email', $request->email)->first();
+
+    // ❌ إذا لم يتم العثور على المستخدم
+    if (!$user) {
+        return response()->json([
+            'success' => false,
+            'message' => 'No account found with this email address.',
+            'error_code' => 'USER_NOT_FOUND',
+        ], 401);
+    }
+
+    // ❌ إذا كانت كلمة المرور غير صحيحة
+    if (!Hash::check($request->password, $user->password)) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Incorrect password. Please try again.',
+            'error_code' => 'INVALID_PASSWORD',
+        ], 401);
+    }
+
+    // ✅ 2. التحقق من أن المستخدم ليس موظفاً في شركة
+    if ($user->isCompanyEmployee()) {
+        return response()->json([
+            'success' => false,
+            'message' => 'This account is a company employee. Please use the company login page.',
+            'error_code' => 'COMPANY_EMPLOYEE',
+        ], 403);
+    }
+
+    // ✅ 3. التحقق من أن المستخدم عادي (role = user)
+    if ($user->role !== 'user') {
+        return response()->json([
+            'success' => false,
+            'message' => 'Invalid account type. Please use the correct login page.',
+            'error_code' => 'INVALID_ACCOUNT_TYPE',
+        ], 403);
+    }
+
+    if (!$user->is_active) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Your account has been suspended. Please contact support.',
+            'error_code' => 'ACCOUNT_SUSPENDED',
+        ], 403);
+    }
+
+    $user->tokens()->delete();
+    $token = $user->createToken('user-token')->plainTextToken;
+
+    return response()->json([
+        'success' => true,
+        'message' => 'Login successful',
+        'data' => [
+            'user' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'role' => $user->role,
+                'avatar' => $user->avatar,
+                'bio' => $user->bio,
+                'roles' => $user->getRoleNames(),
+                'all_permissions' => $user->getAllPermissions()->pluck('name'),
+            ],
+            'token' => $token,
+            'token_type' => 'Bearer',
+        ],
+    ]);
+}
 
     /**
      * Get user profile

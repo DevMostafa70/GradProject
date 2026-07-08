@@ -26,6 +26,7 @@ class Question extends Model
     protected $casts = [
         'expected_skills' => 'array',
         'evaluation_criteria' => 'array',
+        'question_text' => 'array', // 🔹 مهم جداً
         'answered_at' => 'datetime',
         'evaluated_at' => 'datetime',
     ];

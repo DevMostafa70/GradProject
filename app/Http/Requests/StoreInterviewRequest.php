@@ -26,7 +26,8 @@ class StoreInterviewRequest extends FormRequest
             ],
             'skills' => ['required', 'array', 'min:1'],
             'skills.*' => ['string', 'max:100'],
-            'number_of_questions' => ['integer', 'min:3', 'max:10', 'default:5'],
+             // 🔹 MODIFIED: Remove 'default' from validation rules
+            'number_of_questions' => ['nullable', 'integer', 'min:3', 'max:10'],
             // 🔹 NEW: Session duration in minutes (optional)
             'session_duration' => ['nullable', 'integer', 'min:15', 'max:240'],
         ];

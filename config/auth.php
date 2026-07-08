@@ -8,10 +8,10 @@ return [
     |--------------------------------------------------------------------------
     */
 
-    'defaults' => [
-        'guard' => 'candidate',
-        'passwords' => 'candidates',
-    ],
+ 'defaults' => [
+    'guard' => 'web',  // بدلاً من 'candidate'
+    'passwords' => 'users',
+],
 
     /*
     |--------------------------------------------------------------------------
@@ -27,29 +27,26 @@ return [
         // Guard للمرشحين (Candidate)
         'candidate' => [
             'driver' => 'sanctum',
-            'provider' => 'users',  // ← نفس provider
+            'provider' => 'candidates', // ✅ تم التعديل: استخدام provider مخصص للمرشحين
         ],
 
         // Guard للشركات (Company)
         'company' => [
             'driver' => 'sanctum',
-            'provider' => 'users',  // ← نفس provider
+            'provider' => 'companies', // ✅ تم التعديل: استخدام provider مخصص للشركات
         ],
 
         // Guard للأدمن (Admin)
         'admin' => [
             'driver' => 'sanctum',
-            'provider' => 'users',  // ← نفس provider
-        ],
-    ],
-
-    'providers' => [
-        'users' => [
-            'driver' => 'eloquent',
-            'model' => App\Models\User::class,  // ← model واحد فقط
+            'provider' => 'admins', // ✅ تم التعديل: استخدام provider مخصص للأدمن
         ],
 
-
+        // Guard للمستخدمين العاديين (Regular User)
+        'user' => [
+            'driver' => 'sanctum',
+            'provider' => 'users',
+        ],
     ],
 
     /*
@@ -59,25 +56,25 @@ return [
     */
 
     'providers' => [
-        // للمستخدمين العاديين (إذا احتجتهم مستقبلاً)
+        // للمستخدمين العاديين
         'users' => [
             'driver' => 'eloquent',
             'model' => App\Models\User::class,
         ],
 
-        // للمرشحين
+        // للمرشحين (Candidate) - يستخدمون جدول candidates
         'candidates' => [
             'driver' => 'eloquent',
             'model' => App\Models\Candidate::class,
         ],
 
-        // للشركات
+        // للشركات (Company) - يستخدمون جدول companies
         'companies' => [
             'driver' => 'eloquent',
             'model' => App\Models\Company::class,
         ],
 
-        // للأدمن
+        // للأدمن (Admin) - يستخدمون جدول admins
         'admins' => [
             'driver' => 'eloquent',
             'model' => App\Models\Admin::class,

@@ -16,22 +16,27 @@ return Application::configure(basePath: dirname(__DIR__))
 
         health: '/up',
     )
-    ->withMiddleware(function (Middleware $middleware) {
-        $middleware->statefulApi();
-        $middleware->validateCsrfTokens(except: [
-            'broadcasting/auth','stripe/*'
-        ]);
-        $middleware->alias([
-            'role' => \App\Http\Middleware\CheckRole::class, // ✅ تم التعديل (استخدام CheckRole الجديد)
-            'admin' => \App\Http\Middleware\AdminMiddleware::class,
-            'throttle' => \Illuminate\Routing\Middleware\ThrottleRequests::class,
-            'company.authenticated' => \App\Http\Middleware\EnsureAuthenticatedCompany::class,
-            'company.approved' => \App\Http\Middleware\EnsureCompanyApproved::class,
+   ->withMiddleware(function (Middleware $middleware) {
+    $middleware->statefulApi();
+    $middleware->validateCsrfTokens(except: [
+        'broadcasting/auth','stripe/*'
+    ]);
+    $middleware->alias([
+        // ✅ تغيير اسم Middleware المخصص من 'role' إلى 'checkrole'
+        'checkrole' => \App\Http\Middleware\CheckRole::class,
+        'checkpermission' => \App\Http\Middleware\CheckPermission::class,  // ✅ جديد
+        'admin' => \App\Http\Middleware\AdminMiddleware::class,
+        'throttle' => \Illuminate\Routing\Middleware\ThrottleRequests::class,
+        'company.authenticated' => \App\Http\Middleware\EnsureAuthenticatedCompany::class,
+        'company.approved' => \App\Http\Middleware\EnsureCompanyApproved::class,
+        'company.paid' => \App\Http\Middleware\EnsureCompanyHasPaidAccess::class,
 
-             'company.paid' => \App\Http\Middleware\EnsureCompanyHasPaidAccess::class,
-        ]);
-
-    })
+        // ✅ Spatie Middleware مع تحديد الـ Guard
+    'permission' => \Spatie\Permission\Middleware\PermissionMiddleware::class,
+        'role' => \Spatie\Permission\Middleware\RoleMiddleware::class,
+        'role_or_permission' => \Spatie\Permission\Middleware\RoleOrPermissionMiddleware::class,
+    ]);
+})
     ->withExceptions(function (Exceptions $exceptions): void {
         // تخصيص رسالة تجاوز الحد
         $exceptions->render(function (ThrottleRequestsException $e, Request $request) {

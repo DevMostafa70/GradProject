@@ -27,21 +27,31 @@ class CompanyJobController extends Controller
     }
 
     /**
-     * Get authenticated company
+     * Get authenticated company or employee's company
      */
-    /**
- * Get authenticated company
- */
-private function getCompany(): Company
-{
-    $user = auth()->user();
+    private function getCompany()
+    {
+        $user = auth()->user();
 
-    if (!$user || !($user instanceof \App\Models\Company)) {
+        if (!$user) {
+            throw new \Exception('Company not found or unauthorized');
+        }
+
+        // ✅ إذا كان المستخدم Company Owner
+        if ($user instanceof \App\Models\Company) {
+            return $user;
+        }
+
+        // ✅ إذا كان المستخدم موظف (User model مع is_company_employee = true)
+        if ($user instanceof \App\Models\User && $user->isCompanyEmployee()) {
+            $company = $user->company;
+            if ($company) {
+                return $company;
+            }
+        }
+
         throw new \Exception('Company not found or unauthorized');
     }
-
-    return $user;
-}
 
     /**
      * Create a new job posting

@@ -1,4 +1,5 @@
 <?php
+// database/seeders/PlanSeeder.php
 
 declare(strict_types=1);
 
@@ -21,6 +22,10 @@ final class PlanSeeder extends Seeder
                 'interviews_limit' => 10,
                 'jobs_limit' => 3,
                 'candidates_limit' => 50,
+                'max_employees' => 1,
+                'stripe_product_id' => 'prod_UiQTnaY8TvCZMu',
+                'stripe_price_monthly_id' => 'price_1TizcAQ1fJwm8tI5ijTSLhqN',
+                'stripe_price_yearly_id' => 'price_1TlvGEQ1fJwm8tI5Guk6b9Hi',
                 'is_active' => true,
                 'is_default' => true,
             ],
@@ -33,6 +38,10 @@ final class PlanSeeder extends Seeder
                 'interviews_limit' => 50,
                 'jobs_limit' => 10,
                 'candidates_limit' => 200,
+                'max_employees' => 5,
+                'stripe_product_id' => 'prod_UlSQhmSEMDRuYt',
+                'stripe_price_monthly_id' => 'price_1TlvVxQ1fJwm8tI508cfmfrB',
+                'stripe_price_yearly_id' => 'price_1TlvWYQ1fJwm8tI53a9Xl8Gp',
                 'is_active' => true,
                 'is_default' => false,
             ],
@@ -45,6 +54,10 @@ final class PlanSeeder extends Seeder
                 'interviews_limit' => 999999,
                 'jobs_limit' => 999999,
                 'candidates_limit' => 999999,
+                'max_employees' => 20,
+                'stripe_product_id' => 'prod_UlSTAQhWNejAqh',
+                'stripe_price_monthly_id' => 'price_1TlvYDQ1fJwm8tI5Dlek6euR',
+                'stripe_price_yearly_id' => 'price_1TlvYxQ1fJwm8tI58T09Wm4V',
                 'is_active' => true,
                 'is_default' => false,
             ],
@@ -52,11 +65,15 @@ final class PlanSeeder extends Seeder
                 'slug' => 'enterprise',
                 'name' => 'Enterprise',
                 'description' => 'Custom limits and custom contract for enterprise companies.',
-                'monthly_price' => 0.00,  // ✅ بدلاً من null
-                'yearly_price' => 0.00,   // ✅ بدلاً من null
+                'monthly_price' => 0.00,
+                'yearly_price' => 0.00,
                 'interviews_limit' => 999999,
                 'jobs_limit' => 999999,
                 'candidates_limit' => 999999,
+                'max_employees' => 999999,
+                'stripe_product_id' => null,
+                'stripe_price_monthly_id' => null,
+                'stripe_price_yearly_id' => null,
                 'is_active' => true,
                 'is_default' => false,
             ],
@@ -69,6 +86,9 @@ final class PlanSeeder extends Seeder
             );
         }
 
-        $this->command->info('✅ Plans seeded successfully!');
+        $this->command->info('✅ Plans seeded successfully with Stripe Price IDs!');
+        $this->command->info('📋 Starter: price_1TizcAQ1fJwm8tI5ijTSLhqN');
+        $this->command->info('📋 Growth: price_1TlvVxQ1fJwm8tI508cfmfrB');
+        $this->command->info('📋 Business: price_1TlvYDQ1fJwm8tI5Dlek6euR');
     }
 }

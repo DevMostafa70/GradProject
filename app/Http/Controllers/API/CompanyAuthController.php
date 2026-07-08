@@ -4,12 +4,15 @@ namespace App\Http\Controllers\API;
 
 use App\Http\Controllers\Controller;
 use App\Models\Company;
+use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rules;
+use Spatie\Permission\Models\Role;
 
 class CompanyAuthController extends Controller
 {
@@ -17,81 +20,84 @@ class CompanyAuthController extends Controller
      * Register a new company
      * POST /api/company/register
      */
-    public function register(Request $request): JsonResponse
-    {
-        $request->validate([
-            'company_name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255|unique:companies',
-            'password' => ['required', 'confirmed', Rules\Password::defaults()],
-            'industry' => 'nullable|string|max:255',
-            'phone' => 'nullable|string|max:20',
-        ]);
+public function register(Request $request): JsonResponse
+{
+    $request->validate([
+        'company_name' => 'required|string|max:255',
+        'email' => 'required|string|email|max:255|unique:companies',
+        'password' => ['required', 'confirmed', Rules\Password::defaults()],
+        'industry' => 'nullable|string|max:255',
+        'phone' => 'nullable|string|max:20',
+    ]);
 
-        // إنشاء الشركة مباشرة في جدول companies (بدون user)
-        $company = Company::create([
-            'company_name' => $request->company_name,
-            'email' => $request->email,
-            'password' => Hash::make($request->password),
-            'industry' => $request->industry,
-            'phone' => $request->phone,
-            'status' => 'pending',
-        ]);
+    // إنشاء الشركة
+    $company = Company::create([
+        'company_name' => $request->company_name,
+        'email' => $request->email,
+        'password' => Hash::make($request->password),
+        'industry' => $request->industry,
+        'phone' => $request->phone,
+        'status' => 'pending',
+        'current_employees' => 1, // ✅ NEW: Owner is the first employee
+    ]);
 
-        $token = $company->createToken('company-token')->plainTextToken;
+    // ✅ NEW: تعيين دور company_owner تلقائياً
+    $ownerRole = Role::where('name', 'company_owner')
+        ->where('guard_name', 'company')
+        ->first();
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Company registered successfully. Waiting for admin approval.',
-            'data' => [
-                'company' => [
-                    'id' => $company->id,
-                    'company_name' => $company->company_name,
-                    'email' => $company->email,
-                    'status' => $company->status,
-                ],
-                'token' => $token,
-                'token_type' => 'Bearer',
-            ],
-        ], 201);
+    if ($ownerRole) {
+        $company->assignRole($ownerRole);
     }
 
-    /**
-     * Login company
-     * POST /api/company/login
-     */
-    public function login(Request $request): JsonResponse
-    {
-        $request->validate([
-            'email' => 'required|email',
-            'password' => 'required|string',
-        ]);
+    $token = $company->createToken('company-token')->plainTextToken;
 
-        // البحث عن الشركة مباشرة في جدول companies
-        $company = Company::where('email', $request->email)->first();
+    return response()->json([
+        'success' => true,
+        'message' => 'Company registered successfully. Waiting for admin approval.',
+        'data' => [
+            'company' => [
+                'id' => $company->id,
+                'company_name' => $company->company_name,
+                'email' => $company->email,
+                'status' => $company->status,
+                'roles' => $company->getRoleNames(),
+            ],
+            'token' => $token,
+            'token_type' => 'Bearer',
+        ],
+    ], 201);
+}
 
-        if (!$company || !Hash::check($request->password, $company->password)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid credentials',
-            ], 401);
-        }
+/**
+ * Login company or employee
+ * POST /api/company/login
+ */
+public function login(Request $request): JsonResponse
+{
+    $request->validate([
+        'email' => 'required|email',
+        'password' => 'required|string',
+    ]);
 
-        // التحقق من حالة الشركة
+    // ✅ 1. البحث عن Company Owner أولاً
+    $company = Company::where('email', $request->email)->first();
+
+    if ($company && Hash::check($request->password, $company->password)) {
+        // ✅ هذا Company Owner
         if ($company->status !== 'approved') {
             $message = $company->status === 'pending'
-                ? 'Your company account is pending admin approval.'
-                : 'Your company account has been suspended or rejected.';
+                ? 'Your company account is pending admin approval. Please wait for confirmation.'
+                : 'Your company account has been suspended or rejected. Please contact support.';
 
             return response()->json([
                 'success' => false,
                 'message' => $message,
+                'error_code' => 'COMPANY_' . strtoupper($company->status),
             ], 403);
         }
 
-        // حذف التوكنات القديمة
         $company->tokens()->delete();
-
-        // إنشاء توكن جديد
         $token = $company->createToken('company-token')->plainTextToken;
 
         return response()->json([
@@ -105,12 +111,130 @@ class CompanyAuthController extends Controller
                     'status' => $company->status,
                     'industry' => $company->industry,
                     'phone' => $company->phone,
+                    'roles' => $company->getRoleNames(),
+                    'all_permissions' => $company->getAllPermissions()->pluck('name'),
+                    'is_company_owner' => true,
                 ],
                 'token' => $token,
                 'token_type' => 'Bearer',
             ],
         ]);
     }
+
+    // ✅ 2. البحث عن Employee في جدول users
+    $employee = User::where('email', $request->email)
+        ->where('is_company_employee', true)
+        ->first();
+
+    // ❌ إذا لم يتم العثور على الموظف
+    if (!$employee) {
+        return response()->json([
+            'success' => false,
+            'message' => 'No account found with this email address.',
+            'error_code' => 'USER_NOT_FOUND',
+        ], 401);
+    }
+
+    // ❌ إذا كانت كلمة المرور غير صحيحة
+    if (!Hash::check($request->password, $employee->password)) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Incorrect password. Please try again.',
+            'error_code' => 'INVALID_PASSWORD',
+        ], 401);
+    }
+
+    // ✅ التحقق من أن الموظف مفعل
+    if (!$employee->is_active) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Your account has been deactivated. Please contact your company administrator.',
+            'error_code' => 'ACCOUNT_DEACTIVATED',
+        ], 403);
+    }
+
+    // ✅ التحقق من أن الشركة لا تزال نشطة
+    $company = $employee->company;
+    if ($company && $company->status !== 'approved') {
+        return response()->json([
+            'success' => false,
+            'message' => 'Your company account is not active. Please contact support.',
+            'error_code' => 'COMPANY_INACTIVE',
+        ], 403);
+    }
+
+    $employee->tokens()->delete();
+    $token = $employee->createToken('company-token')->plainTextToken;
+
+    // ✅ جلب الصلاحيات من guard = user
+    $permissions = $employee->getAllPermissions()->pluck('name');
+
+    return response()->json([
+        'success' => true,
+        'message' => 'Login successful',
+        'data' => [
+            'company' => [
+                'id' => $employee->id,
+                'name' => $employee->name,
+                'email' => $employee->email,
+                'status' => $company?->status ?? 'active',
+                'roles' => $employee->getRoleNames(),
+                'all_permissions' => $permissions,
+                'is_company_owner' => false,
+                'is_company_employee' => true,
+                'company_id' => $employee->company_id,
+                'company_name' => $company?->company_name,
+            ],
+            'token' => $token,
+            'token_type' => 'Bearer',
+        ],
+    ]);
+}
+
+/**
+ * جلب صلاحيات الموظف من قاعدة البيانات
+ */
+private function getEmployeePermissions($user): array
+{
+    try {
+        return DB::table('model_has_permissions')
+            ->where('model_id', $user->id)
+            ->where('model_type', 'App\\Models\\User')
+            ->join('permissions', 'model_has_permissions.permission_id', '=', 'permissions.id')
+            ->where('permissions.guard_name', 'company')
+            ->pluck('permissions.name')
+            ->toArray();
+    } catch (\Exception $e) {
+        return [];
+    }
+}
+
+/**
+ * جلب معلومات الموظف
+ */
+private function getEmployeeInfo($user): ?array
+{
+    if (!$user->is_company_employee || !$user->company_id) {
+        return null;
+    }
+
+    $company = $user->company;
+
+    if (!$company) {
+        return null;
+    }
+
+    return [
+        'company_id' => $company->id,
+        'company_name' => $company->company_name,
+        'plan' => $company->selectedPlan?->name,
+        'max_employees' => $company->getMaxEmployees(),
+        'current_employees' => $company->getCurrentEmployees(),
+        'remaining_slots' => $company->getRemainingEmployeeSlots(),
+        'is_owner' => false,
+    ];
+}
+
 
     /**
      * Logout company

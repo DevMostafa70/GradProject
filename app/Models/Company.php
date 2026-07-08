@@ -10,10 +10,14 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 use Laravel\Cashier\Billable;
+use Spatie\Permission\Traits\HasRoles;
 
 class Company extends Authenticatable
 {
-    use Billable, HasApiTokens, HasFactory, Notifiable;
+    use Billable, HasApiTokens, HasFactory, Notifiable, HasRoles;
+
+    protected $guard_name = 'company';
+
     protected $table = 'companies';
 
     protected $fillable = [
@@ -30,6 +34,7 @@ class Company extends Authenticatable
         'admin_notes',
         'approved_at',
         'approved_by',
+        'current_employees',
 
         // Billing
         'selected_plan_id',
@@ -50,6 +55,7 @@ class Company extends Authenticatable
     protected $casts = [
         'approved_at' => 'datetime',
         'email_verified_at' => 'datetime',
+        'current_employees' => 'integer',
 
         // Billing
         'billing_status' => BillingStatus::class,
@@ -89,6 +95,25 @@ class Company extends Authenticatable
     public function stripeWebhookEvents(): HasMany
     {
         return $this->hasMany(StripeWebhookEvent::class, 'company_id');
+    }
+
+    // ✅ NEW: Employees (users who belong to this company as employees)
+    public function employees(): HasMany
+    {
+        return $this->hasMany(User::class, 'company_id')
+            ->where('is_company_employee', true);
+    }
+
+    // ✅ NEW: All users associated with this company (including owner if in users table)
+    public function companyUsers(): HasMany
+    {
+        return $this->hasMany(User::class, 'company_id');
+    }
+
+    // ✅ NEW: Permission templates for this company
+    public function permissionTemplates(): HasMany
+    {
+        return $this->hasMany(CompanyPermissionTemplate::class, 'company_id');
     }
 
     // ==================== دوال مساعدة ====================
@@ -146,6 +171,155 @@ class Company extends Authenticatable
         }
 
         return $this->selectedPlan->hasFeature($feature);
+    }
+
+    // ============================================================
+    // ✅ NEW: Employee Management Methods
+    // ============================================================
+
+    /**
+     * Get the maximum number of employees allowed based on the selected plan
+     */
+    public function getMaxEmployees(): int
+    {
+        if (!$this->selectedPlan) {
+            return 1; // Default if no plan selected
+        }
+
+        return $this->selectedPlan->getMaxEmployees();
+    }
+
+    /**
+     * Get the current number of employees (including owner)
+     */
+    public function getCurrentEmployees(): int
+    {
+        return $this->current_employees ?? 1;
+    }
+
+    /**
+     * Check if the company can add a new employee
+     */
+    public function canAddEmployee(): bool
+    {
+        $currentCount = $this->getCurrentEmployees();
+        $maxEmployees = $this->getMaxEmployees();
+
+        return $currentCount < $maxEmployees;
+    }
+
+    /**
+     * Get the number of remaining employee slots
+     */
+    public function getRemainingEmployeeSlots(): int
+    {
+        $currentCount = $this->getCurrentEmployees();
+        $maxEmployees = $this->getMaxEmployees();
+
+        return max(0, $maxEmployees - $currentCount);
+    }
+
+    /**
+     * Increment the employee count
+     */
+    public function incrementEmployeeCount(): void
+    {
+        $this->increment('current_employees');
+    }
+
+    /**
+     * Decrement the employee count
+     */
+    public function decrementEmployeeCount(): void
+    {
+        $this->decrement('current_employees');
+    }
+
+    /**
+     * Get employee limit information as array
+     */
+    public function getEmployeeLimitInfo(): array
+    {
+        return [
+            'max_employees' => $this->getMaxEmployees(),
+            'current_employees' => $this->getCurrentEmployees(),
+            'remaining_slots' => $this->getRemainingEmployeeSlots(),
+            'can_add' => $this->canAddEmployee(),
+            'plan_name' => $this->selectedPlan?->name ?? 'No Plan',
+            'plan_slug' => $this->selectedPlan?->slug ?? 'none',
+        ];
+    }
+
+    /**
+     * Check if employee limit is reached
+     */
+    public function isEmployeeLimitReached(): bool
+    {
+        return !$this->canAddEmployee();
+    }
+
+    /**
+     * Get all employees with their permissions
+     */
+    public function getEmployeesWithPermissions(): \Illuminate\Support\Collection
+    {
+        return $this->employees()->with('roles', 'permissions')->get()->map(function ($employee) {
+            return [
+                'id' => $employee->id,
+                'name' => $employee->name,
+                'email' => $employee->email,
+                'is_active' => $employee->is_active,
+                'roles' => $employee->getRoleNames(),
+                'permissions' => $employee->getAllPermissions()->pluck('name'),
+                'created_at' => $employee->created_at,
+            ];
+        });
+    }
+
+    // ============================================================
+    // ✅ NEW: Sync employee permissions with template
+    // ============================================================
+
+    /**
+     * Assign permissions to an employee from a template
+     */
+    public function assignEmployeePermissions(User $employee, CompanyPermissionTemplate $template): void
+    {
+        if ($employee->company_id !== $this->id) {
+            throw new \Exception('Employee does not belong to this company');
+        }
+
+        $employee->syncPermissions($template->permissions);
+
+        // Update employee count if needed
+        if (!$employee->is_company_employee) {
+            $employee->update([
+                'is_company_employee' => true,
+            ]);
+            $this->incrementEmployeeCount();
+        }
+    }
+
+    /**
+     * Remove employee from company
+     */
+    public function removeEmployee(User $employee): void
+    {
+        if ($employee->company_id !== $this->id) {
+            throw new \Exception('Employee does not belong to this company');
+        }
+
+        // Remove all permissions and roles
+        $employee->syncPermissions([]);
+        $employee->syncRoles([]);
+
+        // Remove company association
+        $employee->update([
+            'company_id' => null,
+            'is_company_employee' => false,
+        ]);
+
+        $this->decrementEmployeeCount();
     }
 
     // ==================== حالة الشركة ====================

@@ -25,6 +25,7 @@ final class Plan extends Model
         'interviews_limit',
         'jobs_limit',
         'candidates_limit',
+        'max_employees',  // ✅ NEW
         'features',
         'is_active',
         'is_default',
@@ -39,6 +40,7 @@ final class Plan extends Model
             'interviews_limit' => 'integer',
             'jobs_limit' => 'integer',
             'candidates_limit' => 'integer',
+             'max_employees' => 'integer',  // ✅ NEW
             'features' => 'array',
             'is_active' => 'boolean',
             'is_default' => 'boolean',
@@ -64,7 +66,26 @@ final class Plan extends Model
             'jobs' => $this->jobs_limit,
             'candidates' => $this->candidates_limit,
             'interviews' => $this->interviews_limit,
+             'employees' => $this->max_employees,  // ✅ NEW
             default => null,
         };
+    }
+
+      // ✅ NEW: Get max employees allowed
+    public function getMaxEmployees(): int
+    {
+        return $this->max_employees ?? 1;
+    }
+
+    // ✅ NEW: Check if can add more employees
+    public function canAddEmployees(int $currentCount): bool
+    {
+        return $currentCount < $this->getMaxEmployees();
+    }
+
+    // ✅ NEW: Get remaining employee slots
+    public function getRemainingSlots(int $currentCount): int
+    {
+        return max(0, $this->getMaxEmployees() - $currentCount);
     }
 }
