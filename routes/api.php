@@ -134,7 +134,6 @@ Route::prefix('company')
         // ============================================================
         // ✅ Company Dashboard
         // ============================================================
-        // ✅ Company Dashboard
         Route::get('/dashboard', [CompanyDashboardController::class, 'index'])
             ->middleware('checkpermission:company.dashboard.view');
 

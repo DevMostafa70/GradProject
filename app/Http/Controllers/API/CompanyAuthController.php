@@ -16,10 +16,14 @@ use Spatie\Permission\Models\Role;
 
 class CompanyAuthController extends Controller
 {
-    /**
-     * Register a new company
-     * POST /api/company/register
-     */
+
+
+
+
+/**
+ * Register a new company
+ * POST /api/company/register
+ */
 public function register(Request $request): JsonResponse
 {
     $request->validate([
@@ -38,10 +42,10 @@ public function register(Request $request): JsonResponse
         'industry' => $request->industry,
         'phone' => $request->phone,
         'status' => 'pending',
-        'current_employees' => 1, // ✅ NEW: Owner is the first employee
+        'current_employees' => 1,
     ]);
 
-    // ✅ NEW: تعيين دور company_owner تلقائياً
+    // تعيين دور company_owner تلقائياً
     $ownerRole = Role::where('name', 'company_owner')
         ->where('guard_name', 'company')
         ->first();
@@ -50,8 +54,7 @@ public function register(Request $request): JsonResponse
         $company->assignRole($ownerRole);
     }
 
-    $token = $company->createToken('company-token')->plainTextToken;
-
+    // ❌ لا يتم إنشاء توكن هنا (الشركة تنتظر الموافقة)
     return response()->json([
         'success' => true,
         'message' => 'Company registered successfully. Waiting for admin approval.',
@@ -63,8 +66,7 @@ public function register(Request $request): JsonResponse
                 'status' => $company->status,
                 'roles' => $company->getRoleNames(),
             ],
-            'token' => $token,
-            'token_type' => 'Bearer',
+            // ✅ لا يوجد token هنا!
         ],
     ], 201);
 }
@@ -84,7 +86,7 @@ public function login(Request $request): JsonResponse
     $company = Company::where('email', $request->email)->first();
 
     if ($company && Hash::check($request->password, $company->password)) {
-        // ✅ هذا Company Owner
+        // ✅ التحقق من حالة الشركة
         if ($company->status !== 'approved') {
             $message = $company->status === 'pending'
                 ? 'Your company account is pending admin approval. Please wait for confirmation.'
