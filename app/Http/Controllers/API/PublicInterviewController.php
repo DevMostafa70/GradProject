@@ -202,8 +202,8 @@ class PublicInterviewController extends Controller
             'status' => 'pending',
         ]);
 
-        // توليد الأسئلة باستخدام LLM
-        $questionsData = $this->llmService->generateQuestionsForJob($job, $interview);
+        // ✅ توليد الأسئلة حسب مصدر السؤال (mixed, ai_only, company_only)
+        $questionsData = $this->generateQuestionsBySource($job, $interview);
 
         // حفظ الأسئلة
         foreach ($questionsData as $index => $questionData) {
@@ -214,6 +214,7 @@ class PublicInterviewController extends Controller
                 'expected_skills' => $questionData['expected_skills'] ?? $job->required_skills,
                 'evaluation_criteria' => $questionData['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
                 'order' => $index + 1,
+                'source' => $questionData['source'] ?? 'system',
                 'status' => 'pending',
             ]);
         }
@@ -266,9 +267,148 @@ class PublicInterviewController extends Controller
                     'order' => $firstQuestion->order,
                     'text' => $firstQuestion->question_text,
                     'type' => $firstQuestion->type,
+                    'source' => $firstQuestion->source ?? 'system',
                 ],
             ],
         ]);
+    }
+
+    /**
+     * توليد الأسئلة حسب مصدر السؤال (mixed, ai_only, company_only)
+     */
+    private function generateQuestionsBySource($job, $interview): array
+    {
+        $sourceType = $job->questions_source ?? 'mixed';
+        $allQuestions = [];
+
+        switch ($sourceType) {
+            case 'ai_only':
+                // ✅ فقط أسئلة من الذكاء الاصطناعي
+                $allQuestions = $this->llmService->generateQuestionsForJob($job, $interview);
+                // إضافة مصدر system لكل سؤال
+                foreach ($allQuestions as &$q) {
+                    $q['source'] = 'system';
+                }
+                break;
+
+            case 'company_only':
+                // ✅ فقط أسئلة من بنك الشركة
+                $allQuestions = $this->getCompanyQuestions($job);
+                break;
+
+            case 'mixed':
+            default:
+                // ✅ مزيج من الذكاء الاصطناعي + بنك الشركة
+                $aiQuestions = $this->llmService->generateQuestionsForJob($job, $interview);
+                $companyQuestions = $this->getCompanyQuestions($job);
+                $allQuestions = $this->interleaveQuestions($aiQuestions, $companyQuestions, $job);
+                break;
+        }
+
+        return $allQuestions;
+    }
+
+    /**
+     * جلب الأسئلة من بنك الشركة
+     */
+    private function getCompanyQuestions($job): array
+    {
+        $questionBank = $job->questionBank;
+
+        if (!$questionBank || empty($questionBank->questions)) {
+            // إذا لم يكن هناك بنك أسئلة، استخدم أسئلة افتراضية
+            return $this->getFallbackCompanyQuestions($job);
+        }
+
+        $questions = [];
+        $bankQuestions = $questionBank->questions;
+
+        // اختيار عدد الأسئلة المطلوبة (company_questions_count)
+        $count = $job->company_questions_count ?? 2;
+        $selected = array_slice($bankQuestions, 0, $count);
+
+        foreach ($selected as $q) {
+            $questions[] = [
+                'question_text' => $q['question'] ?? $q,
+                'type' => $q['type'] ?? 'behavioral',
+                'source' => 'company',
+                'expected_skills' => $job->required_skills,
+                'evaluation_criteria' => ['clarity', 'relevance', 'depth'],
+            ];
+        }
+
+        return $questions;
+    }
+
+    /**
+     * دمج الأسئلة (تناوب بين AI و Company)
+     */
+    private function interleaveQuestions(array $aiQuestions, array $companyQuestions, $job): array
+    {
+        $result = [];
+        $totalQuestions = $job->number_of_questions ?? 5;
+
+        // تحديد عدد الأسئلة من كل مصدر
+        $aiCount = $job->ai_questions_count ?? 3;
+        $companyCount = $job->company_questions_count ?? 2;
+
+        // أخذ العدد المطلوب من كل مصدر
+        $aiSelected = array_slice($aiQuestions, 0, $aiCount);
+        $companySelected = array_slice($companyQuestions, 0, $companyCount);
+
+        // إضافة مصدر لكل سؤال
+        foreach ($aiSelected as &$q) {
+            $q['source'] = 'system';
+        }
+        foreach ($companySelected as &$q) {
+            $q['source'] = 'company';
+        }
+
+        // دمج بالتناوب
+        $maxCount = max(count($aiSelected), count($companySelected));
+
+        for ($i = 0; $i < $maxCount && count($result) < $totalQuestions; $i++) {
+            if ($i < count($aiSelected) && count($result) < $totalQuestions) {
+                $result[] = $aiSelected[$i];
+            }
+            if ($i < count($companySelected) && count($result) < $totalQuestions) {
+                $result[] = $companySelected[$i];
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * أسئلة افتراضية للشركة إذا لم يكن هناك بنك أسئلة
+     */
+    private function getFallbackCompanyQuestions($job): array
+    {
+        $skills = implode(', ', $job->required_skills ?? ['التقنية']);
+
+        return [
+            [
+                'question_text' => "لماذا تريد العمل في شركتنا؟",
+                'type' => 'behavioral',
+                'source' => 'company',
+                'expected_skills' => $job->required_skills ?? [],
+                'evaluation_criteria' => ['clarity', 'relevance', 'motivation'],
+            ],
+            [
+                'question_text' => "صف تجربتك مع {$skills}",
+                'type' => 'technical',
+                'source' => 'company',
+                'expected_skills' => $job->required_skills ?? [],
+                'evaluation_criteria' => ['clarity', 'depth', 'technical_accuracy'],
+            ],
+            [
+                'question_text' => "أين ترى نفسك بعد 3 سنوات؟",
+                'type' => 'behavioral',
+                'source' => 'company',
+                'expected_skills' => [],
+                'evaluation_criteria' => ['clarity', 'relevance', 'ambition'],
+            ],
+        ];
     }
 
     /**
@@ -330,32 +470,65 @@ class PublicInterviewController extends Controller
             ], 404);
         }
 
-        // حفظ الإجابة
-        $answer = $question->answers()->create([
-            'interview_id' => $interview->id,
-            'transcription' => $request->answer_transcript,
-            'duration_seconds' => $request->duration_seconds ?? 0,
-            'status' => 'processing',
-            'submitted_at' => now(),
-        ]);
+        // ✅ التحقق من وجود إجابة مسبقة (لتجنب التكرار)
+        $existingAnswer = $question->answer;
+
+        if ($existingAnswer) {
+            // تحديث الإجابة القديمة
+            $existingAnswer->update([
+                'transcription' => $request->answer_transcript,
+                'duration_seconds' => $request->duration_seconds ?? 0,
+                'status' => 'processing',
+                'submitted_at' => now(),
+            ]);
+            $answer = $existingAnswer;
+        } else {
+            // إنشاء إجابة جديدة
+            $answer = $question->answer()->create([
+                'interview_id' => $interview->id,
+                'transcription' => $request->answer_transcript,
+                'duration_seconds' => $request->duration_seconds ?? 0,
+                'status' => 'processing',
+                'submitted_at' => now(),
+            ]);
+        }
 
         // تقييم الإجابة باستخدام LLM
         $evaluation = $this->llmService->evaluateAnswer($question, $request->answer_transcript);
 
-        // حفظ التقييم
+        // ✅ حفظ التقييم مع تحويل المصفوفات إلى JSON
         $answer->update([
             'status' => 'evaluated',
             'processed_at' => now(),
         ]);
 
-        $answer->evaluation()->create([
+        // التحقق من وجود تقييم سابق
+        $existingEvaluation = $answer->evaluation;
+
+        $evaluationData = [
             'question_id' => $question->id,
             'interview_id' => $interview->id,
             'score' => $evaluation['score'] ?? 0,
-            'strengths' => $evaluation['strengths'] ?? null,
-            'weaknesses' => $evaluation['weaknesses'] ?? null,
+            'strengths' => json_encode($evaluation['strengths'] ?? []),
+            'weaknesses' => json_encode($evaluation['weaknesses'] ?? []),
             'detailed_feedback' => $evaluation['feedback'] ?? null,
-        ]);
+            'criteria_scores' => json_encode([
+                'clarity' => $evaluation['clarity_score'] ?? 5,
+                'relevance' => $evaluation['relevance_score'] ?? 5,
+                'depth' => $evaluation['depth_score'] ?? 5,
+                'confidence' => $evaluation['confidence_score'] ?? 5,
+            ]),
+            'clarity_score' => $evaluation['clarity_score'] ?? 5,
+            'relevance_score' => $evaluation['relevance_score'] ?? 5,
+            'depth_score' => $evaluation['depth_score'] ?? 5,
+            'confidence_score' => $evaluation['confidence_score'] ?? 5,
+        ];
+
+        if ($existingEvaluation) {
+            $existingEvaluation->update($evaluationData);
+        } else {
+            $answer->evaluation()->create($evaluationData);
+        }
 
         // التحقق من وجود أسئلة متبقية
         $answeredCount = $interview->answers()->count();
@@ -383,6 +556,7 @@ class PublicInterviewController extends Controller
                     'order' => $nextQuestion->order,
                     'text' => $nextQuestion->question_text,
                     'type' => $nextQuestion->type,
+                    'source' => $nextQuestion->source ?? 'system',
                 ] : null,
             ],
         ]);
