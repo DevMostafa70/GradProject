@@ -4,16 +4,16 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use App\Models\Concerns\HasTranslations;
 
 class JobCategory extends Model
 {
-    use HasFactory;
+    use HasFactory, HasTranslations;
 
     protected $table = 'job_categories';
 
     protected $fillable = [
-        'name_ar',
-        'name_en',
+        'name',
         'icon',
         'color',
         'sort_order',
@@ -22,6 +22,7 @@ class JobCategory extends Model
     ];
 
     protected $casts = [
+        'name' => 'array',
         'is_active' => 'boolean',
         'sort_order' => 'integer',
         'job_count' => 'integer',

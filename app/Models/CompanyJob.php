@@ -7,10 +7,11 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Str;
+use App\Models\Concerns\HasTranslations;
 
 class CompanyJob extends Model
 {
-    use HasFactory;
+    use HasFactory, HasTranslations;
 
     protected $table = 'company_jobs';
 
@@ -43,6 +44,8 @@ class CompanyJob extends Model
         'hide_score_from_candidate' => 'boolean',
 
         'difficulty_distribution' => 'array',
+        'title' => 'array',
+        'description' => 'array',
 
     ];
 

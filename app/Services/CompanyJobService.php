@@ -21,7 +21,7 @@ class CompanyJobService
         $this->llmService = $llmService;
     }
 
-     /**
+    /**
      * Create a new job posting
      * إنشاء وظيفة جديدة
      */
@@ -48,7 +48,6 @@ class CompanyJobService
             Log::info('CompanyJobService: Job created with ID: ' . $job->id);
 
             return $job;
-
         } catch (\Exception $e) {
             Log::error('CompanyJobService: Error creating job: ' . $e->getMessage());
             Log::error('CompanyJobService: Data received: ' . json_encode($data));
@@ -114,8 +113,9 @@ class CompanyJobService
             // Create interview
             $interview = Interview::create([
                 'user_id' => $candidate->id,
-                'position' => $job->title,
+                'position' => $job->translate('title'),
                 'experience_level' => 'mid',
+                'locale' => app()->getLocale(),
                 'difficulty' => $job->difficulty,
                 'skills' => $job->required_skills,
                 'number_of_questions' => count($allQuestions),
@@ -128,7 +128,7 @@ class CompanyJobService
                 $question = Question::create([
                     'interview_id' => $interview->id,
                     'job_id' => $questionData['source'] === 'company' ? $job->id : null,
-                    'question_text' => $questionData['question_text'],
+                    'question_text' => \App\Models\Question::localized($questionData['question_text'] ?? null, $interview->locale),
                     'type' => $questionData['type'] ?? 'technical',
                     'expected_skills' => $questionData['expected_skills'] ?? [],
                     'evaluation_criteria' => $questionData['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
@@ -449,8 +449,4 @@ EOT;
                 ];
             });
     }
-
-
-
-
 }

@@ -19,8 +19,10 @@ class AudioTranscriptionService
         $this->audioServiceUrl = env('AUDIO_SERVICE_URL', 'http://127.0.0.1:5001');
     }
 
-    public function transcribe($audioFile): array
+    public function transcribe($audioFile, ?string $locale = null): array
     {
+        $locale = $this->normalizeLocale($locale);
+
         try {
             if ($audioFile instanceof UploadedFile) {
                 $filePath = $audioFile->getRealPath();
@@ -45,7 +47,7 @@ class AudioTranscriptionService
                     'transcript' => 'Transcription failed',
                     'error' => 'Audio file exceeds 25MB limit',
                     'confidence' => 0,
-                    'language' => 'en',
+                    'language' => $locale,
                     'duration' => null,
                     'word_count' => 0,
                 ];
@@ -62,7 +64,7 @@ class AudioTranscriptionService
                 'model' => 'whisper-1',
                 'file' => $resource,
                 'response_format' => 'verbose_json',
-                'language' => 'en',
+                'language' => $locale,
                 'temperature' => 0.2,
             ]);
 
@@ -71,9 +73,9 @@ class AudioTranscriptionService
             }
 
             $transcript = $response->text ?? '';
-            $language = $response->language ?? 'en';
+            $language = $response->language ?? $locale;
             $duration = $response->duration ?? null;
-            $wordCount = str_word_count($transcript);
+            $wordCount = $this->countWords($transcript);
 
             $confidence = 0.95;
 
@@ -120,15 +122,17 @@ class AudioTranscriptionService
                 'transcript' => 'Transcription failed',
                 'error' => $e->getMessage(),
                 'confidence' => 0,
-                'language' => 'en',
+                'language' => $locale,
                 'duration' => null,
                 'word_count' => 0,
             ];
         }
     }
 
-    public function transcribeWithGPT4oMini($audioFile): array
+    public function transcribeWithGPT4oMini($audioFile, ?string $locale = null): array
     {
+        $locale = $this->normalizeLocale($locale);
+
         try {
             if ($audioFile instanceof UploadedFile) {
                 $filePath = $audioFile->getRealPath();
@@ -164,8 +168,10 @@ class AudioTranscriptionService
                 'model' => 'gpt-4o-mini-transcribe',
                 'file' => $resource,
                 'response_format' => 'verbose_json',
-                'language' => 'en',
-                'prompt' => 'This is a job interview answer. Focus on technical accuracy and clarity.',
+                'language' => $locale,
+                'prompt' => $locale === 'ar'
+                    ? 'هذه إجابة في مقابلة عمل. اكتب الكلام المنطوق بدقة كما هو باللغة العربية، مع الحفاظ على المصطلحات التقنية.'
+                    : 'This is a job interview answer. Transcribe the spoken English accurately and preserve technical terms.',
             ]);
 
             if (is_resource($resource)) {
@@ -173,13 +179,13 @@ class AudioTranscriptionService
             }
 
             $transcript = $response->text ?? '';
-            $wordCount = str_word_count($transcript);
+            $wordCount = $this->countWords($transcript);
 
             return [
                 'success' => true,
                 'transcript' => $transcript,
                 'confidence' => 0.96,
-                'language' => $response->language ?? 'en',
+                'language' => $response->language ?? $locale,
                 'duration' => $response->duration ?? null,
                 'word_count' => $wordCount,
                 'model_used' => 'gpt-4o-mini-transcribe',
@@ -191,13 +197,13 @@ class AudioTranscriptionService
                 'fallback' => 'using whisper-1',
             ]);
 
-            return $this->transcribe($audioFile);
+            return $this->transcribe($audioFile, $locale);
         }
     }
 
-    public function transcribeAuto($audioFile): array
+    public function transcribeAuto($audioFile, ?string $locale = null): array
     {
-        return $this->transcribeWithGPT4oMini($audioFile);
+        return $this->transcribeWithGPT4oMini($audioFile, $locale);
     }
 
     /**
@@ -242,8 +248,8 @@ class AudioTranscriptionService
             ]);
 
             $transcript = $answer->transcription ?? '';
-            $wordCount = str_word_count($transcript);
-            $uniqueWordCount = count(array_unique(str_word_count(strtolower($transcript), 1)));
+            $wordCount = $this->countWords($transcript);
+            $uniqueWordCount = $this->countUniqueWords($transcript);
 
             return [
                 'speaking_rate' => $data['speech_rate']['estimated_speech_rate_wpm'] ?? 0,
@@ -277,7 +283,7 @@ class AudioTranscriptionService
     {
         $duration = $answer->duration_seconds ?? 0;
         $transcript = $answer->transcription ?? '';
-        $wordCount = str_word_count($transcript);
+        $wordCount = $this->countWords($transcript);
 
         $speakingRate = $duration > 0
             ? ($wordCount / $duration) * 60
@@ -294,11 +300,32 @@ class AudioTranscriptionService
             'hesitation_score' => null,
             'clarity_score' => null,
             'word_count' => $wordCount,
-            'unique_word_count' => count(array_unique(str_word_count(strtolower($transcript), 1))),
+            'unique_word_count' => $this->countUniqueWords($transcript),
             'full_analysis_data' => [
                 'fallback' => true,
                 'reason' => 'Python audio service unavailable or failed',
             ],
         ];
     }
+    private function normalizeLocale(?string $locale): string
+    {
+        $locale = strtolower(substr((string) ($locale ?: app()->getLocale()), 0, 2));
+
+        return $locale === 'ar' ? 'ar' : 'en';
+    }
+
+    private function countWords(string $text): int
+    {
+        preg_match_all('/[\p{L}\p{N}]+/u', $text, $matches);
+
+        return count($matches[0] ?? []);
+    }
+
+    private function countUniqueWords(string $text): int
+    {
+        preg_match_all('/[\p{L}\p{N}]+/u', mb_strtolower($text), $matches);
+
+        return count(array_unique($matches[0] ?? []));
+    }
+
 }

@@ -28,6 +28,7 @@ class User extends Authenticatable
         'verified_at',
         'company_id',
         'is_company_employee',
+        'locale',
     ];
 
     protected $hidden = [

@@ -2,224 +2,311 @@
 
 namespace App\Jobs;
 
-use App\Models\Interview;
-use App\Models\FinalReport;
-use App\Services\LLMService;
 use App\Events\FinalReportReady;
+use App\Models\Answer;
+use App\Models\FinalReport;
+use App\Models\Interview;
+use App\Services\LLMService;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use Throwable;
 
-class GenerateFinalReportJob implements ShouldQueue
+class GenerateFinalReportJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $tries = 3; // 🔹 زيادة عدد المحاولات
-    public $backoff = [60, 120, 300]; // 🔹 زيادة وقت الانتظار بين المحاولات
-    public $timeout = 600;
+    public int $tries = 5;
+    public array $backoff = [60, 180, 300, 600, 900];
+    public int $timeout = 600;
+    public int $uniqueFor = 900;
 
-    protected Interview $interview;
+    private const GENERATION_LOCK_STALE_AFTER_MINUTES = 15;
 
-    /**
-     * Create a new job instance.
-     */
-    public function __construct(Interview $interview)
-    {
-        $this->interview = $interview;
+    public function __construct(
+        protected int $interviewId
+    ) {
         $this->onQueue('reports');
     }
 
-    /**
-     * Execute the job.
-     */
+    public function uniqueId(): string
+    {
+        return 'final-report:' . $this->interviewId;
+    }
+
     public function handle(LLMService $llmService): void
     {
+        $lockToken = null;
+        $locale = 'en';
+
         try {
-            // ============================================================
-            // 🔹 NEW: Check if report is already generated
-            // ============================================================
-            if ($this->interview->isReportGenerated()) {
-                Log::info('⏭️ Report already generated, skipping job', [
-                    'interview_id' => $this->interview->id,
-                    'report_exists' => $this->interview->finalReport()->exists(),
-                    'completed_at' => $this->interview->report_generation_completed_at,
-                ]);
+            $lockToken = $this->claimGenerationLock();
+
+            if ($lockToken === null) {
                 return;
             }
 
-            // ============================================================
-            // 🔹 NEW: Acquire report generation lock
-            // ============================================================
-            if (!$this->interview->acquireReportLock()) {
-                Log::info('⏳ Report generation already in progress, releasing job', [
-                    'interview_id' => $this->interview->id,
-                    'started_at' => $this->interview->report_generation_started_at,
-                    'attempts' => $this->interview->report_generation_attempts,
-                ]);
+            $interview = Interview::query()->findOrFail($this->interviewId);
+            $locale = $interview->normalizedLocale();
+            app()->setLocale($locale);
 
-                // If lock is held by another process, release this job to retry later
-                $this->release(30);
-                return;
-            }
-
-            Log::info('🔒 Report generation lock acquired', [
-                'interview_id' => $this->interview->id,
-                'attempts' => $this->interview->report_generation_attempts,
-            ]);
-
-            // ✅ شرط 1: التأكد من أن جميع الإجابات قد اكتملت
-            if (!$this->interview->hasAllAnswersProcessed()) {
-                Log::info('⏳ Not all answers processed yet, releasing job back to queue', [
-                    'interview_id' => $this->interview->id,
-                    'processed' => $this->interview->answers()->where('status', 'evaluated')->count(),
-                    'total' => $this->interview->questions()->count()
-                ]);
-
-                // 🔹 NEW: Release lock and retry
-                $this->interview->resetReportLock();
-                $this->release(5);
-                return;
-            }
-
-            // ✅ شرط 2: التأكد من وجود تقييمات (evaluations) لكل الإجابات
-            $totalQuestions = $this->interview->questions()->count();
-            $evaluationsCount = $this->interview->evaluations()->count();
-
-            if ($evaluationsCount < $totalQuestions) {
-                Log::info('⏳ Not all evaluations ready yet, releasing job back to queue', [
-                    'interview_id' => $this->interview->id,
-                    'evaluations_count' => $evaluationsCount,
-                    'total_questions' => $totalQuestions
-                ]);
-
-                // 🔹 NEW: Release lock and retry
-                $this->interview->resetReportLock();
-                $this->release(3);
-                return;
-            }
-
-            // ✅ شرط 3: التأكد من وجود تحليل صوتي (audio analysis) لكل الإجابات
-            $answersWithAudioAnalysis = $this->interview->answers()
-                ->whereHas('audioAnalysis')
-                ->count();
-
-            if ($answersWithAudioAnalysis < $totalQuestions) {
-                Log::info('⏳ Not all audio analysis ready yet, releasing job back to queue', [
-                    'interview_id' => $this->interview->id,
-                    'with_audio_analysis' => $answersWithAudioAnalysis,
-                    'total_answers' => $totalQuestions
-                ]);
-
-                // 🔹 NEW: Release lock and retry
-                $this->interview->resetReportLock();
-                $this->release(3);
-                return;
-            }
-
-            Log::info('🎯 Generating final report', [
-                'interview_id' => $this->interview->id
-            ]);
-
-            // Load all necessary relationships
-            $this->interview->load([
+            $interview->load([
                 'questions',
+                'answers.question',
                 'answers.audioAnalysis',
                 'answers.evaluation',
-                'antiCheatLogs'
+                'evaluations',
+                'antiCheatLogs',
             ]);
 
-            Log::info('✅ Data loaded', [
-                'interview_id' => $this->interview->id,
-                'questions_count' => $this->interview->questions->count(),
-                'answers_count' => $this->interview->answers->count()
+            Log::info('Generating final report', [
+                'interview_id' => $interview->id,
+                'queue_attempt' => $this->attempts(),
+                'locale' => $locale,
+                'questions_count' => $interview->questions->count(),
+                'answers_count' => $interview->answers->count(),
             ]);
 
-            // Collect all data
-            $answers = $this->interview->answers()->with(['question', 'evaluation', 'audioAnalysis'])->get();
-            $evaluations = $this->interview->evaluations;
+            $answers = $interview->answers;
+            $evaluations = $interview->evaluations;
 
-            // Calculate cheating severity
-            $violationSummary = $this->interview->getViolationSummary();
-            $cheatingSeverityScore = $this->interview->calculateCheatingSeverityScore();
+            $violationSummary = $interview->getViolationSummary();
+            $cheatingSeverityScore = $interview->calculateCheatingSeverityScore();
+            $riskData = $interview->getCheatingRiskData();
 
-            // ============================================================
-            // 🔹 NEW: Calculate cheating risk data
-            // ============================================================
-            $riskData = $this->interview->getCheatingRiskData();
-
-            // Get violations by type for detailed reporting
             $violationsByType = [];
+
             foreach ($violationSummary['by_type'] ?? [] as $violation) {
-                $violationsByType[$violation['violation_type']] = [
-                    'count' => $violation['count'],
-                    'total_duration' => $violation['total_duration'],
-                    'avg_confidence' => $violation['avg_confidence'],
+                $type = $violation['violation_type'] ?? 'unknown';
+
+                $violationsByType[$type] = [
+                    'count' => (int) ($violation['count'] ?? 0),
+                    'total_duration' => (float) ($violation['total_duration'] ?? 0),
+                    'avg_confidence' => (float) ($violation['avg_confidence'] ?? 0),
                 ];
             }
 
-            Log::info('📊 Cheating calculated', [
-                'interview_id' => $this->interview->id,
-                'severity_score' => $cheatingSeverityScore,
-                'risk_level' => $riskData['risk_level'],
-                'risk_label' => $riskData['risk_label'],
-                'total_violations' => $violationSummary['total_violations']
-            ]);
-
-            // Generate report using AI
-            Log::info('🤖 Calling LLMService to generate report...');
-
             $reportData = $llmService->generateFinalReport(
-                $this->interview,
+                $interview,
                 $answers,
                 $evaluations,
                 $violationSummary,
                 $cheatingSeverityScore
             );
 
-            Log::info('✅ LLMService returned report data', [
-                'interview_id' => $this->interview->id,
-                'data_keys' => array_keys($reportData)
+            $this->validateReportData($reportData);
+
+            $finalReport = $this->persistCompletedReport(
+                $lockToken,
+                $reportData,
+                $riskData,
+                $violationSummary,
+                $violationsByType,
+                $cheatingSeverityScore
+            );
+
+            // Broadcast immediately. The polling endpoint remains a fallback.
+            broadcast(new FinalReportReady(
+                Interview::query()->findOrFail($this->interviewId),
+                $finalReport
+            ));
+
+            Log::info('Final report generated successfully', [
+                'interview_id' => $this->interviewId,
+                'report_id' => $finalReport->id,
+                'overall_score' => $finalReport->overall_score,
+                'adjusted_score' => $finalReport->adjusted_score,
+                'queue_attempt' => $this->attempts(),
+                'locale' => $locale,
+            ]);
+        } catch (Throwable $exception) {
+            $this->releaseGenerationLockAfterError($lockToken, $exception);
+
+            Log::error('Failed to generate final report', [
+                'interview_id' => $this->interviewId,
+                'queue_attempt' => $this->attempts(),
+                'locale' => $locale,
+                'max_attempts' => $this->tries,
+                'error' => $exception->getMessage(),
+                'trace' => $exception->getTraceAsString(),
             ]);
 
-            // ============================================================
-            // 🔹 NEW: Double-check that report wasn't created during generation
-            // ============================================================
-            if ($this->interview->isReportGenerated()) {
-                Log::info('⏭️ Report was generated during processing, skipping save', [
-                    'interview_id' => $this->interview->id,
+            throw $exception;
+        }
+    }
+
+    /**
+     * Atomically claim the database-backed generation lock.
+     *
+     * The unique queue lock prevents normal duplicate jobs. The token stored
+     * in metadata provides a second layer of protection across workers and
+     * protects report persistence from stale/duplicate jobs.
+     */
+    private function claimGenerationLock(): ?string
+    {
+        return DB::transaction(function (): ?string {
+            /** @var Interview|null $interview */
+            $interview = Interview::query()
+                ->lockForUpdate()
+                ->find($this->interviewId);
+
+            if (!$interview) {
+                Log::warning('Final report job skipped: interview not found', [
+                    'interview_id' => $this->interviewId,
                 ]);
-                $this->interview->releaseReportLock();
-                return;
+
+                return null;
             }
 
-            // 🔍 DEBUG: Check what we're about to save
-            Log::info('📝 Attempting to save report with data:', [
-                'interview_id' => $this->interview->id,
-                'overall_score' => $reportData['overall_score'] ?? null,
-                'adjusted_score' => $reportData['adjusted_score'] ?? null,
-                'technical_score' => $reportData['technical_score'] ?? null,
-                'communication_score' => $reportData['communication_score'] ?? null,
-                'problem_solving_score' => $reportData['problem_solving_score'] ?? null,
-                'risk_level' => $riskData['risk_level'],
-                'risk_description' => $riskData['risk_description'],
+            if ($interview->finalReport()->exists()) {
+                $this->markExistingReportAsCompleted($interview);
+
+                Log::info('Final report job skipped: report already exists', [
+                    'interview_id' => $this->interviewId,
+                ]);
+
+                return null;
+            }
+
+            $readiness = $this->readinessSnapshot($interview);
+
+            if (!$readiness['all_requirements_ready']) {
+                $metadata = is_array($interview->metadata)
+                    ? $interview->metadata
+                    : [];
+
+                data_set($metadata, 'final_report.dispatch_status', 'waiting');
+                data_set($metadata, 'final_report.waiting_snapshot', $readiness);
+                data_set($metadata, 'final_report.waiting_checked_at', now()->toISOString());
+
+                $interview->forceFill([
+                    'status' => Interview::STATUS_COMPLETED,
+                    'metadata' => $metadata,
+                    'report_generation_started_at' => null,
+                ])->save();
+
+                Log::info('Final report job skipped: requirements are not ready', [
+                    'interview_id' => $this->interviewId,
+                    'readiness' => $readiness,
+                ]);
+
+                return null;
+            }
+
+            $metadata = is_array($interview->metadata)
+                ? $interview->metadata
+                : [];
+
+            $existingToken = data_get($metadata, 'final_report.lock_token');
+            $existingLockAt = data_get($metadata, 'final_report.lock_acquired_at');
+            $lockIsFresh = false;
+
+            if (is_string($existingToken) && $existingToken !== '' && is_string($existingLockAt)) {
+                try {
+                    $lockIsFresh = Carbon::parse($existingLockAt)
+                        ->greaterThan(now()->subMinutes(self::GENERATION_LOCK_STALE_AFTER_MINUTES));
+                } catch (Throwable) {
+                    $lockIsFresh = false;
+                }
+            }
+
+            if ($lockIsFresh) {
+                Log::info('Final report job skipped: another worker owns generation lock', [
+                    'interview_id' => $this->interviewId,
+                    'lock_acquired_at' => $existingLockAt,
+                ]);
+
+                return null;
+            }
+
+            $lockToken = (string) Str::uuid();
+            $attempts = ((int) $interview->report_generation_attempts) + 1;
+
+            data_set($metadata, 'final_report.dispatch_status', 'processing');
+            data_set($metadata, 'final_report.lock_token', $lockToken);
+            data_set($metadata, 'final_report.lock_acquired_at', now()->toISOString());
+            data_set($metadata, 'final_report.worker_attempt', $this->attempts());
+            data_set($metadata, 'final_report.last_error', null);
+
+            $interview->forceFill([
+                'status' => Interview::STATUS_PROCESSING_FINAL,
+                'metadata' => $metadata,
+                'report_generation_started_at' => now(),
+                'report_generation_completed_at' => null,
+                'report_generation_attempts' => $attempts,
+            ])->save();
+
+            $locale = $interview->normalizedLocale();
+
+            Log::info('Final report generation lock acquired', [
+                'interview_id' => $this->interviewId,
+                'database_attempts' => $attempts,
+                'queue_attempt' => $this->attempts(),
+                'locale' => $locale,
             ]);
 
-            // Create or update final report
-            $finalReport = FinalReport::updateOrCreate(
-                ['interview_id' => $this->interview->id],
+            return $lockToken;
+        }, 3);
+    }
+
+    private function persistCompletedReport(
+        string $lockToken,
+        array $reportData,
+        array $riskData,
+        array $violationSummary,
+        array $violationsByType,
+        float $cheatingSeverityScore
+    ): FinalReport {
+        return DB::transaction(function () use (
+            $lockToken,
+            $reportData,
+            $riskData,
+            $violationSummary,
+            $violationsByType,
+            $cheatingSeverityScore
+        ): FinalReport {
+            /** @var Interview $interview */
+            $interview = Interview::query()
+                ->lockForUpdate()
+                ->findOrFail($this->interviewId);
+
+            $existingReport = $interview->finalReport()->first();
+
+            if ($existingReport) {
+                $this->markExistingReportAsCompleted($interview);
+                return $existingReport;
+            }
+
+            $metadata = is_array($interview->metadata)
+                ? $interview->metadata
+                : [];
+
+            $currentToken = data_get($metadata, 'final_report.lock_token');
+
+            if (!is_string($currentToken) || !hash_equals($currentToken, $lockToken)) {
+                throw new \RuntimeException(
+                    'Final report generation lock was lost before persistence.'
+                );
+            }
+
+            $finalReport = FinalReport::query()->updateOrCreate(
+                ['interview_id' => $interview->id],
                 [
                     'overall_score' => $reportData['overall_score'],
                     'adjusted_score' => $reportData['adjusted_score'],
                     'cheating_severity_score' => $cheatingSeverityScore,
-                    // 🔹 Cheating Risk Level fields
-                    'cheating_risk_level' => $riskData['risk_level'],
-                    'cheating_risk_description' => $riskData['risk_description'],
-                    'cheating_recommendation' => $riskData['recommendation'],
+                    'cheating_risk_level' => $riskData['risk_level'] ?? 'unknown',
+                    'cheating_risk_description' => $riskData['risk_description'] ?? null,
+                    'cheating_recommendation' => $riskData['recommendation'] ?? null,
                     'violation_count_by_type' => $violationsByType,
-                    'total_violations' => $violationSummary['total_violations'],
+                    'total_violations' => (int) ($violationSummary['total_violations'] ?? 0),
                     'violation_summary' => $violationSummary,
                     'skill_breakdown' => $reportData['skill_breakdown'],
                     'question_evaluations' => $reportData['question_evaluations'],
@@ -230,7 +317,6 @@ class GenerateFinalReportJob implements ShouldQueue
                     'technical_score' => $reportData['technical_score'],
                     'communication_score' => $reportData['communication_score'],
                     'problem_solving_score' => $reportData['problem_solving_score'],
-                    // 🔹 Educational Fields
                     'educational_summary' => $reportData['educational_summary'] ?? null,
                     'key_strengths' => $reportData['key_strengths'] ?? null,
                     'key_weaknesses' => $reportData['key_weaknesses'] ?? null,
@@ -243,96 +329,183 @@ class GenerateFinalReportJob implements ShouldQueue
                 ]
             );
 
-            // ============================================================
-            // 🔹 NEW: Release the lock and mark as completed
-            // ============================================================
-            $this->interview->releaseReportLock();
+            data_set($metadata, 'final_report.dispatch_status', 'completed');
+            data_set($metadata, 'final_report.completed_at', now()->toISOString());
+            data_set($metadata, 'final_report.report_id', $finalReport->id);
+            data_forget($metadata, 'final_report.lock_token');
+            data_forget($metadata, 'final_report.lock_acquired_at');
+            data_forget($metadata, 'final_report.last_error');
 
-            Log::info('✅ Final report saved to database', [
-                'interview_id' => $this->interview->id,
-                'report_id' => $finalReport->id,
-                'risk_level' => $finalReport->cheating_risk_level,
-            ]);
+            $interview->forceFill([
+                'status' => Interview::STATUS_COMPLETED_WITH_REPORT,
+                'metadata' => $metadata,
+                'report_generation_completed_at' => now(),
+            ])->save();
 
-            // Update interview status
-            $this->interview->update([
-                'status' => Interview::STATUS_COMPLETED_WITH_REPORT
-            ]);
+            return $finalReport->fresh();
+        }, 3);
+    }
 
-            Log::info('✅ Interview status updated', [
-                'interview_id' => $this->interview->id,
-                'new_status' => Interview::STATUS_COMPLETED_WITH_REPORT
-            ]);
+    private function releaseGenerationLockAfterError(
+        ?string $lockToken,
+        Throwable $exception
+    ): void {
+        if ($lockToken === null) {
+            return;
+        }
 
-            // Broadcast WebSocket event
-            broadcast(new FinalReportReady($this->interview, $finalReport))->toOthers();
+        DB::transaction(function () use ($lockToken, $exception): void {
+            $interview = Interview::query()
+                ->lockForUpdate()
+                ->find($this->interviewId);
 
-            Log::info('🎉 Final report generated successfully', [
-                'interview_id' => $this->interview->id,
-                'overall_score' => $reportData['overall_score'],
-                'adjusted_score' => $reportData['adjusted_score'],
-                'cheating_severity' => $cheatingSeverityScore,
-                'risk_level' => $riskData['risk_level'],
-                'risk_label' => $riskData['risk_label'],
-                'attempts' => $this->interview->report_generation_attempts,
-            ]);
-        } catch (\Exception $e) {
-            Log::error('💥 Failed to generate final report', [
-                'interview_id' => $this->interview->id,
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
-                'attempts' => $this->interview->report_generation_attempts ?? 0,
-            ]);
+            if (!$interview || $interview->finalReport()->exists()) {
+                return;
+            }
 
-            // ============================================================
-            // 🔹 NEW: Reset lock on failure (allow retry)
-            // ============================================================
-            $this->interview->resetReportLock();
+            $metadata = is_array($interview->metadata)
+                ? $interview->metadata
+                : [];
 
-            // Mark interview as failed
-            $this->interview->update([
-                'status' => Interview::STATUS_FAILED,
-                'metadata' => array_merge(
-                    $this->interview->metadata ?? [],
-                    [
-                        'report_generation_error' => $e->getMessage(),
-                        'failed_at' => now()->toISOString(),
-                        'attempts' => $this->interview->report_generation_attempts ?? 0,
-                    ]
-                )
-            ]);
+            $currentToken = data_get($metadata, 'final_report.lock_token');
 
-            throw $e;
+            if (!is_string($currentToken) || !hash_equals($currentToken, $lockToken)) {
+                return;
+            }
+
+            $willRetry = $this->attempts() < $this->tries;
+
+            data_set(
+                $metadata,
+                'final_report.dispatch_status',
+                $willRetry ? 'retrying' : 'failed'
+            );
+            data_set($metadata, 'final_report.last_error', $exception->getMessage());
+            data_set($metadata, 'final_report.last_failed_at', now()->toISOString());
+            data_set($metadata, 'final_report.failed_queue_attempt', $this->attempts());
+            data_forget($metadata, 'final_report.lock_token');
+            data_forget($metadata, 'final_report.lock_acquired_at');
+
+            $interview->forceFill([
+                'status' => $willRetry
+                    ? Interview::STATUS_PROCESSING_FINAL
+                    : Interview::STATUS_FAILED,
+                'metadata' => $metadata,
+                'report_generation_started_at' => null,
+            ])->save();
+        }, 3);
+    }
+
+    private function readinessSnapshot(Interview $interview): array
+    {
+        $totalQuestions = $interview->questions()->count();
+        $totalAnswers = $interview->answers()->count();
+        $evaluatedAnswers = $interview->answers()
+            ->where('status', Answer::STATUS_EVALUATED)
+            ->count();
+        $failedAnswers = $interview->answers()
+            ->where('status', Answer::STATUS_FAILED)
+            ->count();
+        $evaluationsCount = $interview->evaluations()->count();
+        $audioAnalysesCount = $interview->answers()
+            ->whereHas('audioAnalysis')
+            ->count();
+
+        return [
+            'total_questions' => $totalQuestions,
+            'total_answers' => $totalAnswers,
+            'evaluated_answers' => $evaluatedAnswers,
+            'failed_answers' => $failedAnswers,
+            'evaluations_count' => $evaluationsCount,
+            'audio_analyses_count' => $audioAnalysesCount,
+            'all_requirements_ready' => $totalQuestions > 0
+                && $failedAnswers === 0
+                && $totalAnswers >= $totalQuestions
+                && $evaluatedAnswers >= $totalQuestions
+                && $evaluationsCount >= $totalQuestions
+                && $audioAnalysesCount >= $totalQuestions,
+        ];
+    }
+
+    private function validateReportData(array $reportData): void
+    {
+        $requiredKeys = [
+            'overall_score',
+            'adjusted_score',
+            'skill_breakdown',
+            'question_evaluations',
+            'executive_summary',
+            'strengths_analysis',
+            'improvement_areas',
+            'hiring_recommendation',
+            'technical_score',
+            'communication_score',
+            'problem_solving_score',
+        ];
+
+        foreach ($requiredKeys as $key) {
+            if (!array_key_exists($key, $reportData)) {
+                throw new \UnexpectedValueException(
+                    "Final report data is missing required key: {$key}"
+                );
+            }
         }
     }
 
-    /**
-     * Handle a job failure.
-     */
-    public function failed(\Throwable $exception): void
+    private function markExistingReportAsCompleted(Interview $interview): void
     {
+        $metadata = is_array($interview->metadata)
+            ? $interview->metadata
+            : [];
+
+        data_set($metadata, 'final_report.dispatch_status', 'completed');
+        data_set(
+            $metadata,
+            'final_report.completed_at',
+            data_get($metadata, 'final_report.completed_at', now()->toISOString())
+        );
+        data_forget($metadata, 'final_report.lock_token');
+        data_forget($metadata, 'final_report.lock_acquired_at');
+
+        $interview->forceFill([
+            'status' => Interview::STATUS_COMPLETED_WITH_REPORT,
+            'metadata' => $metadata,
+            'report_generation_completed_at' =>
+                $interview->report_generation_completed_at ?? now(),
+        ])->save();
+    }
+
+    public function failed(Throwable $exception): void
+    {
+        DB::transaction(function () use ($exception): void {
+            $interview = Interview::query()
+                ->lockForUpdate()
+                ->find($this->interviewId);
+
+            if (!$interview || $interview->finalReport()->exists()) {
+                return;
+            }
+
+            $metadata = is_array($interview->metadata)
+                ? $interview->metadata
+                : [];
+
+            data_set($metadata, 'final_report.dispatch_status', 'failed');
+            data_set($metadata, 'final_report.permanent_error', $exception->getMessage());
+            data_set($metadata, 'final_report.permanently_failed_at', now()->toISOString());
+            data_forget($metadata, 'final_report.lock_token');
+            data_forget($metadata, 'final_report.lock_acquired_at');
+
+            $interview->forceFill([
+                'status' => Interview::STATUS_FAILED,
+                'metadata' => $metadata,
+                'report_generation_started_at' => null,
+            ])->save();
+        }, 3);
+
         Log::error('GenerateFinalReportJob failed permanently', [
-            'interview_id' => $this->interview->id,
+            'interview_id' => $this->interviewId,
             'error' => $exception->getMessage(),
-            'attempts' => $this->interview->report_generation_attempts ?? 0,
-        ]);
-
-        // ============================================================
-        // 🔹 NEW: Ensure lock is released on permanent failure
-        // ============================================================
-        $this->interview->resetReportLock();
-
-        // Update interview status
-        $this->interview->update([
-            'status' => Interview::STATUS_FAILED,
-            'metadata' => array_merge(
-                $this->interview->metadata ?? [],
-                [
-                    'report_generation_failed_permanently' => true,
-                    'error' => $exception->getMessage(),
-                    'failed_at' => now()->toISOString(),
-                ]
-            ),
         ]);
     }
 }

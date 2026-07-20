@@ -21,9 +21,9 @@ class Interview extends Model
         'position',
         'experience_level',
         'difficulty',
-        'locale',
         'skills',
         'number_of_questions',
+        'locale',
         'status',
         'started_at',
         'completed_at',
@@ -166,6 +166,7 @@ class Interview extends Model
     public function updateActivity(): self
     {
         $this->last_activity_at = now();
+        $this->save();
         return $this;
     }
 
@@ -174,10 +175,45 @@ class Interview extends Model
      */
     public function updateProgress(Question $question): self
     {
-        $this->current_question_id = $question->id;
         $this->answered_questions_count = $this->answers()->count();
-        $this->updateActivity();
+        $this->last_activity_at = now();
+        $this->save();
         return $this;
+    }
+
+    /**
+     * Repair and synchronize interview progress from persisted answers.
+     *
+     * This also fixes older records where an answer was saved successfully but
+     * the related question remained pending.
+     */
+    public function synchronizeProgressFromAnswers(): ?Question
+    {
+        $answeredQuestionIds = $this->answers()
+            ->pluck('question_id');
+
+        if ($answeredQuestionIds->isNotEmpty()) {
+            Question::query()
+                ->whereIn('id', $answeredQuestionIds)
+                ->where('status', '!=', Question::STATUS_ANSWERED)
+                ->update([
+                    'status' => Question::STATUS_ANSWERED,
+                    'answered_at' => now(),
+                    'updated_at' => now(),
+                ]);
+        }
+
+        $nextQuestion = $this->questions()
+            ->whereNotIn('id', $answeredQuestionIds)
+            ->orderBy('order')
+            ->first();
+
+        $this->answered_questions_count = $answeredQuestionIds->count();
+        $this->current_question_id = $nextQuestion?->id;
+        $this->last_activity_at = now();
+        $this->save();
+
+        return $nextQuestion;
     }
 
     /**
@@ -185,8 +221,14 @@ class Interview extends Model
      */
     public function getNextQuestion(): ?Question
     {
+        // Answers are the source of truth. Older records may contain an answer
+        // while questions.status is still pending, which previously caused the
+        // frontend to resume on the same question again.
+        $answeredQuestionIds = $this->answers()
+            ->pluck('question_id');
+
         return $this->questions()
-            ->where('status', Question::STATUS_PENDING)
+            ->whereNotIn('id', $answeredQuestionIds)
             ->orderBy('order')
             ->first();
     }
@@ -202,7 +244,6 @@ class Interview extends Model
 
         return [
             'interview_id' => $this->id,
-            'locale' => $this->normalizedLocale(),
             'status' => $this->status,
             'session_token' => $this->session_token,
             'is_valid' => $this->isSessionValid(),
@@ -216,10 +257,10 @@ class Interview extends Model
             'current_question' => $nextQuestion ? [
                 'id' => $nextQuestion->id,
                 'order' => $nextQuestion->order,
-                'text' => $nextQuestion->textForLocale($this->normalizedLocale()),
+                'text' => $nextQuestion->translate('question_text'),
                 'type' => $nextQuestion->type,
                 'interview_id' => $nextQuestion->interview_id,
-                'question_text' => $nextQuestion->textForLocale($this->normalizedLocale()),
+                'question_text' => $nextQuestion->translate('question_text'),
                 'expected_skills' => $nextQuestion->expected_skills,
                 'evaluation_criteria' => $nextQuestion->evaluation_criteria,
                 'status' => $nextQuestion->status,
@@ -250,40 +291,29 @@ class Interview extends Model
         $logs = $this->antiCheatLogs()->get();
 
         if ($logs->isEmpty()) {
-            return 0.0;
+            return 0;
         }
 
-        $defaultWeights = [
+        $severityScore = 0;
+        $weights = [
             'multiple_faces' => 5.0,
             'looking_away' => 2.0,
             'tab_switch' => 3.0,
             'window_blur' => 2.5,
-            'fullscreen_exit' => 3.5,
             'suspicious_movement' => 2.0,
             'audio_anomaly' => 1.5,
             'device_change' => 4.0,
             'browser_console' => 3.5,
             'copy_paste_attempt' => 4.5,
             'screen_capture' => 5.0,
-            'prompt_injection_attempt' => 5.0,
         ];
 
-        $weightedTotal = 0.0;
-
         foreach ($logs as $log) {
-            $baseWeight = (float) ($log->severity_weight ?: ($defaultWeights[$log->violation_type] ?? 1.0));
-            $confidence = max(0.0, min(1.0, (float) $log->confidence_score));
-            $duration = max(0.0, min(300.0, (float) $log->duration_seconds));
-
-            // Every discrete event has a real penalty even when duration is
-            // zero (copy attempt, screenshot, fullscreen exit). Duration then
-            // increases the event impact by up to 100% for a 60-second event.
-            $durationMultiplier = 1.0 + min(1.0, $duration / 60.0);
-
-            $weightedTotal += $baseWeight * $confidence * $durationMultiplier;
+            $baseWeight = $weights[$log->violation_type] ?? 1.0;
+            $severityScore += $baseWeight * $log->confidence_score * ($log->duration_seconds / 60);
         }
 
-        return round(min(10.0, $weightedTotal / 10.0), 2);
+        return min(10, $severityScore / 10);
     }
 
     public function getViolationSummary(): array
@@ -332,7 +362,6 @@ class Interview extends Model
                 'position' => $this->position,
                 'experience_level' => $this->experience_level,
                 'difficulty' => $this->difficulty,
-                'locale' => $this->normalizedLocale(),
                 'skills' => $this->skills,
                 'number_of_questions' => $this->number_of_questions,
                 'status' => $this->status,
@@ -357,11 +386,15 @@ class Interview extends Model
             ],
             'current_question' => $nextQuestion ? [
                 'id' => $nextQuestion->id,
+                'interview_id' => $nextQuestion->interview_id,
                 'order' => $nextQuestion->order,
-                'text' => $nextQuestion->textForLocale($this->normalizedLocale()),
-                'question_text' => $nextQuestion->textForLocale($this->normalizedLocale()),
-                'time_allocation_seconds' => $nextQuestion->time_allocation_seconds,
+                'text' => $nextQuestion->translate('question_text'),
+                'question_text' => $nextQuestion->translate('question_text'),
                 'type' => $nextQuestion->type,
+                'expected_skills' => $nextQuestion->expected_skills,
+                'evaluation_criteria' => $nextQuestion->evaluation_criteria,
+                'status' => $nextQuestion->status,
+                'time_allocation_seconds' => $nextQuestion->time_allocation_seconds,
             ] : null,
             'questions' => $this->questions->map(function ($question) {
                 $answer = $this->answers->firstWhere('question_id', $question->id);
@@ -369,14 +402,16 @@ class Interview extends Model
                 return [
                     'id' => $question->id,
                     'order' => $question->order,
-                    'text' => $question->textForLocale($this->normalizedLocale()),
-                    'question_text' => $question->textForLocale($this->normalizedLocale()),
-                    'time_allocation_seconds' => $question->time_allocation_seconds,
+                    'text' => $question->translate('question_text'),
+                    'question_text' => $question->translate('question_text'),
                     'type' => $question->type,
                     'expected_skills' => $question->expected_skills,
                     'evaluation_criteria' => $question->evaluation_criteria,
-                    'status' => $question->status,
-                    'answered_at' => $question->answered_at?->toISOString(),
+                    'status' => $answer
+                        ? Question::STATUS_ANSWERED
+                        : $question->status,
+                    'time_allocation_seconds' => $question->time_allocation_seconds,
+                    'answered_at' => ($question->answered_at ?? $answer?->submitted_at)?->toISOString(),
                     'evaluated_at' => $question->evaluated_at?->toISOString(),
                     'answer' => $answer ? [
                         'id' => $answer->id,
@@ -388,11 +423,7 @@ class Interview extends Model
                         'evaluation' => $answer->evaluation ? [
                             'id' => $answer->evaluation->id,
                             'score' => $answer->evaluation->score,
-                            'adjusted_score' => data_get(
-                                $answer->evaluation->criteria_scores,
-                                'adjusted_score',
-                                $answer->evaluation->score
-                            ),
+                            'adjusted_score' => $answer->evaluation->adjusted_score,
                             'criteria_scores' => $answer->evaluation->criteria_scores,
                             'strengths' => $answer->evaluation->strengths,
                             'weaknesses' => $answer->evaluation->weaknesses,
@@ -401,11 +432,7 @@ class Interview extends Model
                             'relevance_score' => $answer->evaluation->relevance_score,
                             'depth_score' => $answer->evaluation->depth_score,
                             'confidence_score' => $answer->evaluation->confidence_score,
-                            'cheating_penalty' => data_get(
-                                $answer->evaluation->criteria_scores,
-                                'cheating_penalty',
-                                0
-                            ),
+                            'cheating_penalty' => $answer->evaluation->cheating_penalty,
                         ] : null,
                         'audio_analysis' => $answer->audioAnalysis ? [
                             'speaking_rate' => $answer->audioAnalysis->speaking_rate,
@@ -509,7 +536,7 @@ class Interview extends Model
         if ($currentSessionId && $this->isLockedBySession($currentSessionId)) {
             return [
                 'locked' => true,
-                'message' => 'You already have this interview open in another tab/window',
+                'message' => 'This tab already owns the interview lock',
                 'can_access' => true,
                 'owned_by_current' => true,
                 'session_id' => $this->active_session_id,
@@ -704,14 +731,4 @@ class Interview extends Model
             'has_final_report' => $this->finalReport()->exists(),
         ];
     }
-    /**
-     * Return the interview language as one of the supported locale codes.
-     */
-    public function normalizedLocale(): string
-    {
-        $locale = strtolower(substr((string) ($this->locale ?: app()->getLocale()), 0, 2));
-
-        return $locale === 'ar' ? 'ar' : 'en';
-    }
-
 }

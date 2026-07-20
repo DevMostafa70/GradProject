@@ -21,6 +21,12 @@ return Application::configure(basePath: dirname(__DIR__))
     $middleware->validateCsrfTokens(except: [
         'broadcasting/auth','stripe/*'
     ]);
+
+    $middleware->appendToGroup('api', [
+    \App\Http\Middleware\SetLocale::class,  
+    ]);
+
+    
     $middleware->alias([
         // ✅ تغيير اسم Middleware المخصص من 'role' إلى 'checkrole'
         'checkrole' => \App\Http\Middleware\CheckRole::class,
@@ -43,7 +49,9 @@ return Application::configure(basePath: dirname(__DIR__))
             if ($request->expectsJson()) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'لقد تجاوزت الحد المسموح للطلبات. يرجى الانتظار قليلاً ثم المحاولة مرة أخرى.',
+                    'message' => app()->getLocale() === 'ar'
+                        ? 'لقد تجاوزت الحد المسموح للطلبات. يرجى الانتظار قليلاً ثم المحاولة مرة أخرى.'
+                        : 'You have exceeded the request limit. Please wait briefly and try again.',
                     'retry_after' => $e->getHeaders()['Retry-After'] ?? 60,
                 ], 429);
             }

@@ -12,8 +12,7 @@ class QuestionResource extends JsonResource
         return [
             'id' => $this->id,
             'interview_id' => $this->interview_id,
-            'question_text' => $this->question_text,
-            'type' => $this->type,
+            'question_text' => $this->translate('question_text'),            'type' => $this->type,
             'expected_skills' => $this->expected_skills,
             'evaluation_criteria' => $this->evaluation_criteria,
             'order' => $this->order,

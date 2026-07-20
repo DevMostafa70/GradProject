@@ -21,6 +21,7 @@ public function register(Request $request): JsonResponse
         'name' => 'required|string|max:255',
         'email' => 'required|string|email|max:255|unique:users,email',
         'password' => 'required|string|min:6|confirmed',
+        'locale' => 'nullable|in:en,ar',
     ]);
 
     if ($validator->fails()) {
@@ -48,6 +49,7 @@ public function register(Request $request): JsonResponse
         'password' => Hash::make($request->password),
         'role' => 'user',
         'is_active' => true,
+        'locale' => $request->locale ?? 'en',
         'is_company_employee' => false,
         'company_id' => null,
     ]);
@@ -63,6 +65,7 @@ public function register(Request $request): JsonResponse
                 'name' => $user->name,
                 'email' => $user->email,
                 'role' => $user->role,
+                'locale' => $user->locale,
             ],
             'token' => $token,
             'token_type' => 'Bearer',
@@ -193,6 +196,7 @@ public function login(Request $request): JsonResponse
             'name' => 'sometimes|string|max:255',
             'bio' => 'nullable|string',
             'avatar' => 'nullable|string',
+            'locale' => 'sometimes|in:en,ar',
         ]);
 
         if ($validator->fails()) {
@@ -211,7 +215,9 @@ public function login(Request $request): JsonResponse
         if ($request->has('avatar')) {
             $user->avatar = $request->avatar;
         }
-
+    if ($request->has('locale')) {
+    $user->locale = $request->locale;
+}
         $user->save();
 
         return response()->json([

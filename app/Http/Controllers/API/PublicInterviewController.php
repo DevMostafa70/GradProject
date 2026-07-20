@@ -7,7 +7,11 @@ use App\Models\Candidate;
 use App\Models\CompanyJob;
 use App\Models\Interview;
 use App\Models\Question;
+use App\Models\Answer;
+use App\Jobs\ProcessSingleAnswerJob;
+use App\Jobs\GenerateFinalReportJob;
 use App\Services\LLMService;
+use App\Services\ActivityLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -16,8 +20,6 @@ use Illuminate\Support\Str;
 class PublicInterviewController extends Controller
 {
     protected LLMService $llmService;
-
-    // مدة صلاحية الجلسة بالساعات (قابلة للتعديل)
     protected $sessionDurationHours = 2;
 
     public function __construct(LLMService $llmService)
@@ -26,14 +28,13 @@ class PublicInterviewController extends Controller
     }
 
     /**
-     * Show job details to candidate (via invitation token)
+     * Show job details to candidate
      * GET /interview/join/{token}
      */
     public function showJob($token): JsonResponse
     {
-        // البحث عن المرشح عبر التوكن
         $candidate = Candidate::where('invitation_token', $token)
-            ->with('job')
+            ->with('job.questionBank')
             ->first();
 
         if (!$candidate) {
@@ -43,7 +44,7 @@ class PublicInterviewController extends Controller
             ], 404);
         }
 
-        // ❌ 1. منع العودة إذا كان قد أكمل المقابلة (حتى لو الجلسة صالحة)
+        // منع العودة بعد الإكمال
         if ($candidate->status === 'completed') {
             return response()->json([
                 'success' => false,
@@ -59,109 +60,108 @@ class PublicInterviewController extends Controller
             ], 410);
         }
 
-        // ✅ 2. إذا كان in_progress، تحقق من صلاحية الجلسة
+        // ✅ إذا كان in_progress، تحقق من صلاحية الجلسة واستئنافها
         if ($candidate->status === 'in_progress') {
             if ($candidate->session_expires_at && now()->gt($candidate->session_expires_at)) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Your interview session has expired. You cannot resume the interview.',
+                    'message' => 'Your interview session has expired',
                 ], 410);
             }
 
-            // الجلسة لا تزال صالحة، يمكن العودة
+            // ✅ استئناف المقابلة الموجودة (مش نبدأ من جديد)
             $interview = $candidate->interview;
-            $currentQuestion = null;
 
-            if ($interview) {
-                $currentQuestion = $interview->questions()
-                    ->whereNotIn('id', $interview->answers()->pluck('question_id'))
-                    ->orderBy('order')
-                    ->first();
+            if (!$interview) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Interview not found',
+                ], 404);
             }
+
+            // جلب السؤال الحالي
+            $currentQuestion = $interview->questions()
+                ->whereNotIn('id', $interview->answers()->pluck('question_id'))
+                ->orderBy('order')
+                ->first();
+
+            // جلب حالة كل الأسئلة
+            $allQuestions = $interview->questions()
+                ->orderBy('order')
+                ->get()
+                ->map(function ($q) use ($interview) {
+                    $answer = $interview->answers()->where('question_id', $q->id)->first();
+                    return [
+                        'id' => $q->id,
+                        'order' => $q->order,
+                        'text' => $q->question_text,
+                        'type' => $q->type,
+                        'source' => $q->source ?? 'system',
+                        'status' => $answer ? 'answered' : 'pending',
+                        'evaluated' => $answer ? $answer->status === 'evaluated' : false,
+                    ];
+                });
 
             return response()->json([
                 'success' => true,
                 'data' => [
-                    'candidate' => [
-                        'id' => $candidate->id,
-                        'name' => $candidate->name,
-                        'email' => $candidate->email,
-                    ],
+                    'candidate' => ['id' => $candidate->id, 'name' => $candidate->name],
                     'job' => [
                         'id' => $candidate->job->id,
                         'title' => $candidate->job->title,
                         'description' => $candidate->job->description,
-                        'required_skills' => $candidate->job->required_skills,
-                        'number_of_questions' => $candidate->job->number_of_questions,
-                        'difficulty' => $candidate->job->difficulty,
                     ],
-                    'invitation_token' => $token,
-                    'resume' => true,
-                    'session_expires_at' => $candidate->session_expires_at,
-                    'session_remaining_minutes' => max(0, now()->diffInMinutes($candidate->session_expires_at, false)),
-                    'interview_id' => $interview?->id,
+                    'interview_id' => $interview->id,
+                    'status' => 'resume', // ✅ بنقول للفرونت "استأنف"
                     'current_question' => $currentQuestion ? [
                         'id' => $currentQuestion->id,
                         'order' => $currentQuestion->order,
                         'text' => $currentQuestion->question_text,
                         'type' => $currentQuestion->type,
                     ] : null,
-                    'total_questions' => $interview?->questions()->count() ?? 0,
-                    'answered_questions' => $interview?->answers()->count() ?? 0,
+                    'all_questions' => $allQuestions,
+                    'total_questions' => $allQuestions->count(),
+                    'answered_questions' => $allQuestions->where('status', 'answered')->count(),
+                    'session_expires_at' => $candidate->session_expires_at,
+                    'session_remaining_minutes' => max(0, now()->diffInMinutes($candidate->session_expires_at, false)),
                 ],
             ]);
         }
 
-        // 3. status = 'pending' (لم يبدأ بعد)
+        // status = 'pending' (لم يبدأ بعد)
         return response()->json([
             'success' => true,
             'data' => [
-                'candidate' => [
-                    'id' => $candidate->id,
-                    'name' => $candidate->name,
-                    'email' => $candidate->email,
-                ],
+                'candidate' => ['id' => $candidate->id, 'name' => $candidate->name],
                 'job' => [
                     'id' => $candidate->job->id,
                     'title' => $candidate->job->title,
                     'description' => $candidate->job->description,
-                    'required_skills' => $candidate->job->required_skills,
                     'number_of_questions' => $candidate->job->number_of_questions,
                     'difficulty' => $candidate->job->difficulty,
                 ],
-                'invitation_token' => $token,
-                'resume' => false,
+                'status' => 'new', // ✅ بنقول للفرونت "مقابلة جديدة"
             ],
         ]);
     }
 
     /**
-     * Start interview (generate questions)
+     * Start interview
      * POST /interview/join/{token}/start
      */
     public function start($token): JsonResponse
     {
-        $candidate = Candidate::where('invitation_token', $token)->first();
+        $candidate = Candidate::where('invitation_token', $token)
+            ->with('job.questionBank')
+            ->first();
 
         if (!$candidate) {
-            // 🔥 تسجيل محاولة بدء مقابلة بتوكن غير صالح
-            app(\App\Services\ActivityLogService::class)->failed(
-                'interviews',
-                'start_interview',
-                'محاولة بدء مقابلة بتوكن غير صالح',
-                [
-                    'token' => $token,
-                    'ip' => request()->ip(),
-                ]
-            );
-
             return response()->json([
                 'success' => false,
                 'message' => 'Invalid or expired invitation link',
             ], 404);
         }
 
-        // منع البدء إذا كان قد أكمل المقابلة
         if ($candidate->status === 'completed') {
             return response()->json([
                 'success' => false,
@@ -169,23 +169,19 @@ class PublicInterviewController extends Controller
             ], 400);
         }
 
-        // منع البدء إذا كان في progress ولديه جلسة صالحة (يجب استئنافها)
-        if ($candidate->status === 'in_progress') {
-            if ($candidate->session_expires_at && !now()->gt($candidate->session_expires_at)) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'You already have an in-progress interview. Please resume it.',
-                ], 400);
-            }
-        }
+        // ✅ لو في مقابلة موجودة وصالحة، نرجعها بدل ما نبدأ من جديد
+        if ($candidate->status === 'in_progress' &&
+            $candidate->session_expires_at &&
+            now()->lt($candidate->session_expires_at)) {
 
-        // إذا كان in_progress ولكن الجلسة منتهية، نسمح ببدء جديد
-        if ($candidate->status === 'in_progress' && $candidate->session_expires_at && now()->gt($candidate->session_expires_at)) {
-            // حذف المقابلة القديمة والإجابات
-            if ($candidate->interview) {
-                $candidate->interview->answers()->delete();
-                $candidate->interview->delete();
-            }
+            return response()->json([
+                'success' => true,
+                'message' => 'Resuming existing interview',
+                'data' => [
+                    'interview_id' => $candidate->interview->id,
+                    'resume' => true,
+                ],
+            ]);
         }
 
         $job = $candidate->job;
@@ -193,33 +189,31 @@ class PublicInterviewController extends Controller
         // إنشاء مقابلة جديدة
         $interview = Interview::create([
             'candidate_id' => $candidate->id,
-            'user_id' => null,
             'position' => $job->title,
             'experience_level' => 'mid',
             'difficulty' => $job->difficulty,
             'skills' => $job->required_skills,
             'number_of_questions' => $job->number_of_questions,
             'status' => 'pending',
+            'session_token' => Str::random(64),
         ]);
 
-        // ✅ توليد الأسئلة حسب مصدر السؤال (mixed, ai_only, company_only)
+        // ✅ توليد الأسئلة
         $questionsData = $this->generateQuestionsBySource($job, $interview);
 
-        // حفظ الأسئلة
-        foreach ($questionsData as $index => $questionData) {
+        foreach ($questionsData as $index => $q) {
             Question::create([
                 'interview_id' => $interview->id,
-                'question_text' => $questionData['question_text'],
-                'type' => $questionData['type'] ?? 'technical',
-                'expected_skills' => $questionData['expected_skills'] ?? $job->required_skills,
-                'evaluation_criteria' => $questionData['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
+                'question_text' => $q['question_text'],
+                'type' => $q['type'] ?? 'technical',
+                'expected_skills' => $q['expected_skills'] ?? $job->required_skills,
                 'order' => $index + 1,
-                'source' => $questionData['source'] ?? 'system',
+                'source' => $q['source'] ?? 'system',
                 'status' => 'pending',
             ]);
         }
 
-        // ✅ تحديث حالة المرشح مع وقت انتهاء الجلسة
+        // ✅ تحديث حالة المرشح
         $candidate->update([
             'status' => 'in_progress',
             'started_at' => now(),
@@ -230,9 +224,6 @@ class PublicInterviewController extends Controller
             'status' => 'in_progress',
             'started_at' => now(),
         ]);
-
-        // جلب السؤال الأول
-        $firstQuestion = $interview->questions()->orderBy('order')->first();
 
         // 🔥 تسجيل بدء المقابلة
         app(\App\Services\ActivityLogService::class)->success(
@@ -253,29 +244,272 @@ class PublicInterviewController extends Controller
             ]
         );
 
+
+
+        $firstQuestion = $interview->questions()->orderBy('order')->first();
+
         return response()->json([
             'success' => true,
-            'message' => 'Interview started successfully',
+            'message' => 'Interview started',
             'data' => [
                 'interview_id' => $interview->id,
-                'candidate_id' => $candidate->id,
+                'session_token' => $interview->session_token,
                 'session_expires_at' => $candidate->session_expires_at,
-                'session_remaining_minutes' => $this->sessionDurationHours * 60,
-                'total_questions' => $interview->questions()->count(),
-                'current_question' => [
+                'first_question' => [
                     'id' => $firstQuestion->id,
                     'order' => $firstQuestion->order,
                     'text' => $firstQuestion->question_text,
                     'type' => $firstQuestion->type,
-                    'source' => $firstQuestion->source ?? 'system',
                 ],
+                'total_questions' => $interview->questions()->count(),
             ],
         ]);
     }
 
     /**
-     * توليد الأسئلة حسب مصدر السؤال (mixed, ai_only, company_only)
+     * Submit answer with audio file
+     * POST /interview/join/{token}/answer
      */
+    public function submitAnswer(Request $request, $token): JsonResponse
+    {
+        $request->validate([
+            'interview_id' => 'required|exists:interviews,id',
+            'question_id' => 'required|exists:questions,id',
+            'audio_file' => 'required|file|mimes:webm,mp3,wav,m4a|max:25600',
+            'duration_seconds' => 'required|integer|min:1|max:600',
+            'idempotency_key' => 'nullable|string|max:64', // ✅ منع التكرار
+        ]);
+
+        $candidate = Candidate::where('invitation_token', $token)->first();
+        if (!$candidate) {
+            return response()->json(['success' => false, 'message' => 'Invalid link'], 404);
+        }
+
+        // ✅ التحقق من صلاحية الجلسة
+        if ($candidate->session_expires_at && now()->gt($candidate->session_expires_at)) {
+            return response()->json(['success' => false, 'message' => 'Session expired'], 410);
+        }
+
+        $interview = Interview::where('id', $request->interview_id)
+            ->where('candidate_id', $candidate->id)
+            ->first();
+
+        if (!$interview) {
+            return response()->json(['success' => false, 'message' => 'Interview not found'], 404);
+        }
+
+        // ✅ منع التكرار باستخدام idempotency_key
+        if ($request->idempotency_key) {
+            $existing = Answer::where('idempotency_key', $request->idempotency_key)->first();
+            if ($existing) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Answer already submitted',
+                    'data' => ['answer_id' => $existing->id, 'status' => $existing->status],
+                ]);
+            }
+        }
+
+        $question = Question::where('id', $request->question_id)
+            ->where('interview_id', $interview->id)
+            ->first();
+
+        if (!$question) {
+            return response()->json(['success' => false, 'message' => 'Question not found'], 404);
+        }
+
+        // ✅ تخزين الملف الصوتي
+        $audioPath = $request->file('audio_file')->store(
+            'answers/' . $interview->id, 'public'
+        );
+
+        // ✅ إنشاء أو تحديث الإجابة
+        $answer = Answer::updateOrCreate(
+            ['question_id' => $question->id, 'interview_id' => $interview->id],
+            [
+                'audio_file_path' => $audioPath,
+                'duration_seconds' => $request->duration_seconds,
+                'status' => 'pending',
+                'submitted_at' => now(),
+                'idempotency_key' => $request->idempotency_key ?? Str::uuid(),
+            ]
+        );
+
+        // ✅ تحديث السؤال
+        $question->update(['status' => 'answered', 'answered_at' => now()]);
+
+        // ✅ إرسال للـ Queue (مش مباشر!)
+        ProcessSingleAnswerJob::dispatch($answer, $audioPath)
+            ->onQueue('answers')
+            ->afterCommit();
+
+        // ✅ رد فوري
+        $answeredCount = $interview->answers()->count();
+        $totalQuestions = $interview->questions()->count();
+        $isLast = $answeredCount >= $totalQuestions;
+
+        // ✅ السؤال التالي
+        $nextQuestion = null;
+        if (!$isLast) {
+            $nextQuestion = $interview->questions()
+                ->whereNotIn('id', $interview->answers()->pluck('question_id'))
+                ->orderBy('order')
+                ->first();
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Answer submitted and queued for processing',
+            'data' => [
+                'answer_id' => $answer->id,
+                'status' => 'processing',
+                'is_last' => $isLast,
+                'progress' => [
+                    'answered' => $answeredCount,
+                    'total' => $totalQuestions,
+                ],
+                'next_question' => $nextQuestion ? [
+                    'id' => $nextQuestion->id,
+                    'order' => $nextQuestion->order,
+                    'text' => $nextQuestion->question_text,
+                    'type' => $nextQuestion->type,
+                ] : null,
+            ],
+        ], 201);
+    }
+
+    /**
+     * Complete interview
+     * POST /interview/join/{token}/complete
+     */
+    public function complete(Request $request, $token): JsonResponse
+    {
+        $request->validate([
+            'interview_id' => 'required|exists:interviews,id',
+        ]);
+
+        $candidate = Candidate::where('invitation_token', $token)->first();
+        if (!$candidate) {
+            return response()->json(['success' => false, 'message' => 'Invalid link'], 404);
+        }
+
+        if ($candidate->session_expires_at && now()->gt($candidate->session_expires_at)) {
+            return response()->json(['success' => false, 'message' => 'Session expired'], 410);
+        }
+
+        $interview = Interview::where('id', $request->interview_id)
+            ->where('candidate_id', $candidate->id)
+            ->first();
+
+        if (!$interview) {
+            return response()->json(['success' => false, 'message' => 'Interview not found'], 404);
+        }
+
+        // ✅ التحقق: كل الأسئلة اترد عليها؟
+        $answeredCount = $interview->answers()->count();
+        $totalQuestions = $interview->questions()->count();
+
+        if ($answeredCount < $totalQuestions) {
+            return response()->json([
+                'success' => false,
+                'message' => "Only {$answeredCount}/{$totalQuestions} answered",
+            ], 400);
+        }
+
+        // ✅ تحديث حالة المقابلة
+        $interview->update([
+            'status' => 'completed',
+            'completed_at' => now(),
+        ]);
+
+        // ✅ تحديث حالة المرشح
+        $candidate->update([
+            'status' => 'completed',
+            'completed_at' => now(),
+        ]);
+
+        // ✅ التحقق: هل كل الإجابات تم تقييمها؟
+        if ($interview->hasAllAnswersProcessed()) {
+            $interview->update(['status' => 'processing_final']);
+
+            // ✅ إرسال للـ Queue (مش مباشر!)
+            GenerateFinalReportJob::dispatch($interview)
+                ->onQueue('reports')
+                ->delay(now()->addSeconds(3));
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Interview completed. Report is being generated.',
+            'data' => [
+                'interview_id' => $interview->id,
+                'status' => 'generating_report',
+                'estimated_time_seconds' => 30,
+            ],
+        ]);
+    }
+
+    /**
+     * Check report status (for polling)
+     * GET /interview/join/{token}/status
+     */
+    public function checkStatus($token): JsonResponse
+    {
+        $candidate = Candidate::where('invitation_token', $token)->first();
+        if (!$candidate) {
+            return response()->json(['success' => false], 404);
+        }
+
+        $interview = $candidate->interview;
+        if (!$interview) {
+            return response()->json(['success' => false], 404);
+        }
+
+        $hasReport = $interview->finalReport()->exists();
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'interview_status' => $interview->status,
+                'report_ready' => $hasReport,
+                'answers_processed' => $interview->answers()->where('status', 'evaluated')->count(),
+                'total_answers' => $interview->answers()->count(),
+            ],
+        ]);
+    }
+
+    /**
+     * Get final report
+     * GET /interview/join/{token}/report
+     */
+    public function getReport($token): JsonResponse
+    {
+        $candidate = Candidate::where('invitation_token', $token)->first();
+        if (!$candidate) {
+            return response()->json(['success' => false], 404);
+        }
+
+        $interview = $candidate->interview;
+        if (!$interview) {
+            return response()->json(['success' => false], 404);
+        }
+
+        $report = $interview->finalReport;
+        if (!$report) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Report not yet available',
+            ], 404);
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => $report,
+        ]);
+    }
+
+    // ============ دوال الأسئلة (نفس اللي عندك) ============
+
     private function generateQuestionsBySource($job, $interview): array
     {
         $sourceType = $job->questions_source ?? 'mixed';
@@ -411,229 +645,4 @@ class PublicInterviewController extends Controller
         ];
     }
 
-    /**
-     * Submit answer for a question
-     * POST /interview/join/{token}/answer
-     */
-    public function submitAnswer(Request $request, $token): JsonResponse
-    {
-        $request->validate([
-            'interview_id' => 'required|exists:interviews,id',
-            'question_id' => 'required|exists:questions,id',
-            'answer_transcript' => 'required|string',
-            'duration_seconds' => 'nullable|integer',
-        ]);
-
-        $candidate = Candidate::where('invitation_token', $token)->first();
-
-        if (!$candidate) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid or expired invitation link',
-            ], 404);
-        }
-
-        // ✅ التحقق من صلاحية الجلسة
-        if ($candidate->status !== 'in_progress') {
-            return response()->json([
-                'success' => false,
-                'message' => 'You cannot submit answers. The interview is not in progress.',
-            ], 400);
-        }
-
-        if ($candidate->session_expires_at && now()->gt($candidate->session_expires_at)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Your interview session has expired. You cannot submit more answers.',
-            ], 410);
-        }
-
-        $interview = Interview::where('id', $request->interview_id)
-            ->where('candidate_id', $candidate->id)
-            ->first();
-
-        if (!$interview) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Interview not found',
-            ], 404);
-        }
-
-        $question = Question::where('id', $request->question_id)
-            ->where('interview_id', $interview->id)
-            ->first();
-
-        if (!$question) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Question not found',
-            ], 404);
-        }
-
-        // ✅ التحقق من وجود إجابة مسبقة (لتجنب التكرار)
-        $existingAnswer = $question->answer;
-
-        if ($existingAnswer) {
-            // تحديث الإجابة القديمة
-            $existingAnswer->update([
-                'transcription' => $request->answer_transcript,
-                'duration_seconds' => $request->duration_seconds ?? 0,
-                'status' => 'processing',
-                'submitted_at' => now(),
-            ]);
-            $answer = $existingAnswer;
-        } else {
-            // إنشاء إجابة جديدة
-            $answer = $question->answer()->create([
-                'interview_id' => $interview->id,
-                'transcription' => $request->answer_transcript,
-                'duration_seconds' => $request->duration_seconds ?? 0,
-                'status' => 'processing',
-                'submitted_at' => now(),
-            ]);
-        }
-
-        // تقييم الإجابة باستخدام LLM
-        $evaluation = $this->llmService->evaluateAnswer($question, $request->answer_transcript);
-
-        // ✅ حفظ التقييم مع تحويل المصفوفات إلى JSON
-        $answer->update([
-            'status' => 'evaluated',
-            'processed_at' => now(),
-        ]);
-
-        // التحقق من وجود تقييم سابق
-        $existingEvaluation = $answer->evaluation;
-
-        $evaluationData = [
-            'question_id' => $question->id,
-            'interview_id' => $interview->id,
-            'score' => $evaluation['score'] ?? 0,
-            'strengths' => json_encode($evaluation['strengths'] ?? []),
-            'weaknesses' => json_encode($evaluation['weaknesses'] ?? []),
-            'detailed_feedback' => $evaluation['feedback'] ?? null,
-            'criteria_scores' => json_encode([
-                'clarity' => $evaluation['clarity_score'] ?? 5,
-                'relevance' => $evaluation['relevance_score'] ?? 5,
-                'depth' => $evaluation['depth_score'] ?? 5,
-                'confidence' => $evaluation['confidence_score'] ?? 5,
-            ]),
-            'clarity_score' => $evaluation['clarity_score'] ?? 5,
-            'relevance_score' => $evaluation['relevance_score'] ?? 5,
-            'depth_score' => $evaluation['depth_score'] ?? 5,
-            'confidence_score' => $evaluation['confidence_score'] ?? 5,
-        ];
-
-        if ($existingEvaluation) {
-            $existingEvaluation->update($evaluationData);
-        } else {
-            $answer->evaluation()->create($evaluationData);
-        }
-
-        // التحقق من وجود أسئلة متبقية
-        $answeredCount = $interview->answers()->count();
-        $totalQuestions = $interview->questions()->count();
-        $isLast = $answeredCount >= $totalQuestions;
-
-        $nextQuestion = null;
-        if (!$isLast) {
-            $nextQuestion = $interview->questions()
-                ->whereNotIn('id', $interview->answers()->pluck('question_id'))
-                ->orderBy('order')
-                ->first();
-        }
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Answer submitted successfully',
-            'data' => [
-                'answer_id' => $answer->id,
-                'score' => $evaluation['score'] ?? null,
-                'feedback' => $evaluation['feedback'] ?? null,
-                'is_last' => $isLast,
-                'next_question' => $nextQuestion ? [
-                    'id' => $nextQuestion->id,
-                    'order' => $nextQuestion->order,
-                    'text' => $nextQuestion->question_text,
-                    'type' => $nextQuestion->type,
-                    'source' => $nextQuestion->source ?? 'system',
-                ] : null,
-            ],
-        ]);
-    }
-
-    /**
-     * Complete interview and generate final report
-     * POST /interview/join/{token}/complete
-     */
-    public function complete(Request $request, $token): JsonResponse
-    {
-        $request->validate([
-            'interview_id' => 'required|exists:interviews,id',
-        ]);
-
-        $candidate = Candidate::where('invitation_token', $token)->first();
-
-        if (!$candidate) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid or expired invitation link',
-            ], 404);
-        }
-
-        // ✅ التحقق من أن الجلسة لا تزال صالحة للإكمال
-        if ($candidate->session_expires_at && now()->gt($candidate->session_expires_at)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Your interview session has expired. You cannot complete the interview.',
-            ], 410);
-        }
-
-        $interview = Interview::where('id', $request->interview_id)
-            ->where('candidate_id', $candidate->id)
-            ->first();
-
-        if (!$interview) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Interview not found',
-            ], 404);
-        }
-
-        // حساب متوسط الدرجات
-        $averageScore = $interview->evaluations()->avg('score') ?? 0;
-
-        // تحديث حالة المرشح
-        $candidate->update([
-            'status' => 'completed',
-            'completed_at' => now(),
-            'final_score' => $averageScore,
-        ]);
-
-        // تحديث حالة المقابلة
-        $interview->update([
-            'status' => 'completed_with_report',
-            'completed_at' => now(),
-        ]);
-
-        // تجميع الإجابات والتقييمات للتقرير النهائي
-        $answers = $interview->answers()->with('evaluation')->get();
-        $evaluations = $interview->evaluations()->get();
-
-        // توليد التقرير النهائي
-        $finalReport = $this->llmService->generateFinalReport($interview, $answers, $evaluations);
-
-        $interview->finalReport()->create($finalReport);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Interview completed successfully',
-            'data' => [
-                'candidate_id' => $candidate->id,
-                'interview_id' => $interview->id,
-                'final_score' => round($averageScore * 10, 2),
-                'report' => $finalReport,
-            ],
-        ]);
-    }
 }

@@ -37,8 +37,12 @@ class AdminSkillController extends Controller
     public function store(Request $request): JsonResponse
     {
         $request->validate([
-            'name' => 'required|string|unique:skills',
-            'category' => 'nullable|string',
+            'name' => 'required|array',
+            'name.en' => 'required|string|max:255',
+            'name.ar' => 'required|string|max:255',
+            'category' => 'nullable|array',
+            'category.en' => 'nullable|string|max:255',
+            'category.ar' => 'nullable|string|max:255',
         ]);
 
         $skill = $this->adminService->createSkill($request->only(['name', 'category']));
@@ -56,8 +60,12 @@ class AdminSkillController extends Controller
     public function update(Request $request, Skill $skill): JsonResponse
     {
         $request->validate([
-            'name' => 'required|string|unique:skills,name,' . $skill->id,
-            'category' => 'nullable|string',
+            'name' => 'required|array',
+            'name.en' => 'required|string|max:255',
+            'name.ar' => 'required|string|max:255',
+            'category' => 'nullable|array',
+            'category.en' => 'nullable|string|max:255',
+            'category.ar' => 'nullable|string|max:255',
             'is_active' => 'nullable|boolean',
         ]);
 

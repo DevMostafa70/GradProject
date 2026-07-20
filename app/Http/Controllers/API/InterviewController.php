@@ -5,13 +5,11 @@ namespace App\Http\Controllers\API;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreInterviewRequest;
 use App\Http\Resources\InterviewResource;
-use App\Http\Resources\QuestionResource;
 use App\Http\Resources\FinalReportResource;
-use App\Jobs\GenerateFinalReportJob;
 use App\Models\Interview;
 use App\Models\Question;
-use App\Models\FinalReport;
 use App\Services\LLMService;
+use App\Services\FinalReportCoordinator;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -22,109 +20,133 @@ use Illuminate\Support\Facades\DB;
 class InterviewController extends Controller
 {
     protected LLMService $llmService;
+    protected FinalReportCoordinator $finalReportCoordinator;
 
     // 🔹 NEW: Default session duration in minutes
     protected int $defaultSessionDuration = 60;
 
-    public function __construct(LLMService $llmService)
-    {
+    public function __construct(
+        LLMService $llmService,
+        FinalReportCoordinator $finalReportCoordinator
+    ) {
         $this->llmService = $llmService;
+        $this->finalReportCoordinator = $finalReportCoordinator;
     }
 
-   /**
- * Start a new interview
- */
-public function store(StoreInterviewRequest $request)
-{
-    try {
-        // Get session duration from request or use default
-        $sessionDuration = $request->input('session_duration', $this->defaultSessionDuration);
+    /**
+     * Start a new interview
+     */
+    public function store(StoreInterviewRequest $request)
+    {
+        try {
+            // Get session duration from request or use default
+            $sessionDuration = $request->input('session_duration', $this->defaultSessionDuration);
 
-        // Create interview with session management
-        $interview = Interview::create([
-            'user_id' => Auth::id(),
-            'position' => $request->position,
-            'experience_level' => $request->experience_level,
-            'difficulty' => $request->difficulty,
-            'skills' => $request->skills,
-            'number_of_questions' => $request->number_of_questions ?? 5,
-            'status' => Interview::STATUS_PENDING,
-            // 🔹 Session Management
-            'session_token' => null, // Will be generated after questions are created
-            'expires_at' => null, // Will be set after questions are created
-            'last_activity_at' => null,
-            'current_question_id' => null,
-            'answered_questions_count' => 0,
-            // 🔹 NEW: Tab Lock columns
-            'active_session_id' => null,
-            'session_initialized_at' => null,
-            'device_fingerprint' => null,
-        ]);
+            $locale = $this->normalizeLocale(
+                $request->validated('locale') ?? $request->header('Accept-Language') ?? app()->getLocale()
+            );
 
-        // Generate questions using AI
-        $questionsData = $this->llmService->generateQuestions($interview);
+            // Keep Laravel translations aligned with the interview language for this request.
+            app()->setLocale($locale);
 
-        // Save questions
-        foreach ($questionsData as $questionData) {
-            Question::create(array_merge($questionData, [
-                'interview_id' => $interview->id,
-                'status' => Question::STATUS_PENDING,
-            ]));
+            // Create interview with session management
+            $interview = Interview::create([
+                'user_id' => Auth::id(),
+                'position' => $request->position,
+                'experience_level' => $request->experience_level,
+                'difficulty' => $request->difficulty,
+                'skills' => $request->skills,
+                'number_of_questions' => $request->number_of_questions ?? 5,
+                'locale' => $locale,
+                'status' => Interview::STATUS_PENDING,
+                // 🔹 Session Management
+                'session_token' => null, // Will be generated after questions are created
+                'expires_at' => null, // Will be set after questions are created
+                'last_activity_at' => null,
+                'current_question_id' => null,
+                'answered_questions_count' => 0,
+                // 🔹 NEW: Tab Lock columns
+                'active_session_id' => null,
+                'session_initialized_at' => null,
+                'device_fingerprint' => null,
+            ]);
+
+            // Generate questions using AI
+            $questionsData = $this->llmService->generateQuestions($interview);
+
+            // Save questions
+            foreach ($questionsData as $questionData) {
+                Question::create(array_merge($questionData, [
+                    'question_text' => \App\Models\Question::localized($questionData['question_text'] ?? null, $interview->locale),
+
+                    'interview_id' => $interview->id,
+                    'status' => Question::STATUS_PENDING,
+                ]));
+            }
+
+            // 🔹 Generate session token and set expiration
+            $interview->generateSessionToken();
+            $interview->setExpiration($sessionDuration);
+
+            // Set the first question as current
+            $firstQuestion = $interview->questions()->orderBy('order')->first();
+            if ($firstQuestion) {
+                $interview->current_question_id = $firstQuestion->id;
+            }
+
+            // 🔹 NEW: Lock the interview for the current session
+            $sessionId = $request->input('session_id') ?? $interview->session_token;
+            $deviceFingerprint = $request->input('device_fingerprint');
+            // $interview->lock($sessionId, $deviceFingerprint);
+
+            // Update interview status
+            $interview->update([
+                'status' => Interview::STATUS_IN_PROGRESS,
+                'started_at' => now(),
+                'last_activity_at' => now(),
+            ]);
+
+            // Reload with relationships
+            $interview->load('questions');
+
+            return response()->json([
+                'success' => true,
+                'message' => $this->message($locale, 'تم بدء المقابلة بنجاح.', 'Interview started successfully.'),
+                'data' => new InterviewResource($interview),
+                "first_question" => [
+                    'id' => $firstQuestion->id,
+                    'interview_id' => $firstQuestion->interview_id,
+                    'question_text' => $firstQuestion->translate('question_text'),
+                    'type' => $firstQuestion->type,
+                    'expected_skills' => $firstQuestion->expected_skills,
+                    'evaluation_criteria' => $firstQuestion->evaluation_criteria,
+                    'order' => $firstQuestion->order,
+                    'status' => $firstQuestion->status,
+                    "time_allocation_seconds" => $firstQuestion->time_allocation_seconds
+                ],
+                // 🔹 Session info
+                'session' => [
+                    'token' => $interview->session_token,
+                    'expires_at' => $interview->expires_at?->toISOString(),
+                    'expires_in_minutes' => $sessionDuration,
+                    'current_question_id' => $interview->current_question_id,
+                    // 🔹 NEW: Lock info
+                    'locked' => false,
+                    'session_id' => $interview->active_session_id,
+                ],
+            ], 201);
+        } catch (\Exception $e) {
+            Log::error('Failed to start interview: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => $this->message($locale ?? app()->getLocale(), 'تعذر بدء المقابلة.', 'Failed to start interview.'),
+                'error' => $e->getMessage(),
+            ], 500);
         }
-
-        // 🔹 Generate session token and set expiration
-        $interview->generateSessionToken();
-        $interview->setExpiration($sessionDuration);
-
-        // Set the first question as current
-        $firstQuestion = $interview->questions()->orderBy('order')->first();
-        if ($firstQuestion) {
-            $interview->current_question_id = $firstQuestion->id;
-        }
-
-        // 🔹 NEW: Lock the interview for the current session
-        $sessionId = $request->input('session_id') ?? $interview->session_token;
-        $deviceFingerprint = $request->input('device_fingerprint');
-        $interview->lock($sessionId, $deviceFingerprint);
-
-        // Update interview status
-        $interview->update([
-            'status' => Interview::STATUS_IN_PROGRESS,
-            'started_at' => now(),
-            'last_activity_at' => now(),
-        ]);
-
-        // Reload with relationships
-        $interview->load('questions');
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Interview started successfully',
-            'data' => new InterviewResource($interview),
-            // 🔹 Session info
-            'session' => [
-                'token' => $interview->session_token,
-                'expires_at' => $interview->expires_at?->toISOString(),
-                'expires_in_minutes' => $sessionDuration,
-                'current_question_id' => $interview->current_question_id,
-                // 🔹 NEW: Lock info
-                'locked' => true,
-                'session_id' => $interview->active_session_id,
-            ],
-        ], 201);
-
-    } catch (\Exception $e) {
-        Log::error('Failed to start interview: ' . $e->getMessage(), [
-            'trace' => $e->getTraceAsString()
-        ]);
-
-        return response()->json([
-            'success' => false,
-            'message' => 'Failed to start interview',
-            'error' => $e->getMessage(),
-        ], 500);
     }
-}
 
     /**
      * 🔹 NEW: Get session status for an interview
@@ -133,6 +155,7 @@ public function store(StoreInterviewRequest $request)
     public function sessionStatus(Interview $interview): JsonResponse
     {
         Gate::authorize('view', $interview);
+        $this->useInterviewLocale($interview);
 
         // If interview is already completed, return simple status
         if (in_array($interview->status, [
@@ -143,7 +166,7 @@ public function store(StoreInterviewRequest $request)
             return response()->json([
                 'success' => true,
                 'data' => $interview->getSessionStatus(),
-                'message' => 'Interview is already completed',
+                'message' => $this->message(app()->getLocale(), 'المقابلة مكتملة بالفعل.', 'Interview is already completed.'),
             ]);
         }
 
@@ -154,7 +177,7 @@ public function store(StoreInterviewRequest $request)
 
             return response()->json([
                 'success' => false,
-                'message' => 'Interview session has expired',
+                'message' => $this->message(app()->getLocale(), 'انتهت صلاحية جلسة المقابلة.', 'The interview session has expired.'),
                 'data' => $interview->getSessionStatus(),
             ], 410); // 410 Gone
         }
@@ -181,9 +204,11 @@ public function store(StoreInterviewRequest $request)
         if (!$interview) {
             return response()->json([
                 'success' => false,
-                'message' => 'Invalid session token',
+                'message' => $this->message(app()->getLocale(), 'رمز جلسة المقابلة غير صالح.', 'The interview session token is invalid.'),
             ], 404);
         }
+
+        $this->useInterviewLocale($interview);
 
         return $this->sessionStatus($interview);
     }
@@ -194,6 +219,7 @@ public function store(StoreInterviewRequest $request)
     public function show(Interview $interview): JsonResponse
     {
         Gate::authorize('view', $interview);
+        $this->useInterviewLocale($interview);
 
         return response()->json([
             'success' => true,
@@ -207,86 +233,139 @@ public function store(StoreInterviewRequest $request)
     public function complete(Interview $interview): JsonResponse
     {
         Gate::authorize('update', $interview);
-
-        if ($interview->status !== Interview::STATUS_IN_PROGRESS) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Interview cannot be completed in its current state',
-            ], 400);
-        }
-
-        // Check if all questions are answered
-        $answeredCount = $interview->answers()->count();
-        $totalQuestions = $interview->questions()->count();
-
-        if ($answeredCount < $totalQuestions) {
-            return response()->json([
-                'success' => false,
-                'message' => "Only {$answeredCount} of {$totalQuestions} questions answered",
-            ], 400);
-        }
+        $this->useInterviewLocale($interview);
 
         try {
-            DB::beginTransaction();
+            $completion = DB::transaction(function () use ($interview): array {
+                /** @var Interview $lockedInterview */
+                $lockedInterview = Interview::query()
+                    ->lockForUpdate()
+                    ->findOrFail($interview->id);
 
-            $interview->update([
-                'status' => Interview::STATUS_COMPLETED,
-                'completed_at' => now(),
-                'last_activity_at' => now(), // 🔹 NEW
-            ]);
+                $totalQuestions = $lockedInterview->questions()->count();
+                $answeredCount = $lockedInterview->answers()->count();
 
-            // Mark pending questions
-            $pendingQuestions = $interview->questions()
-                ->where('status', Question::STATUS_PENDING)
-                ->get();
+                if ($answeredCount < $totalQuestions) {
+                    return [
+                        'completed' => false,
+                        'http_status' => 400,
+                        'message' => $this->message(app()->getLocale(), "تمت الإجابة عن {$answeredCount} فقط من أصل {$totalQuestions} سؤالاً.", "Only {$answeredCount} of {$totalQuestions} questions were answered."),
+                        'total_questions' => $totalQuestions,
+                        'answered_count' => $answeredCount,
+                    ];
+                }
 
-            foreach ($pendingQuestions as $question) {
-                $question->update([
-                    'status' => Question::STATUS_ANSWERED,
-                    'answer_text' => $question->answer_text ?? 'No answer provided',
-                    'answered_at' => now(),
-                ]);
+                $alreadyCompleted = in_array($lockedInterview->status, [
+                    Interview::STATUS_COMPLETED,
+                    Interview::STATUS_PROCESSING_FINAL,
+                    Interview::STATUS_COMPLETED_WITH_REPORT,
+                    Interview::STATUS_FAILED,
+                ], true);
+
+                if (
+                    !$alreadyCompleted
+                    && $lockedInterview->status !== Interview::STATUS_IN_PROGRESS
+                ) {
+                    return [
+                        'completed' => false,
+                        'http_status' => 400,
+                        'message' => $this->message(app()->getLocale(), 'لا يمكن إنهاء المقابلة في حالتها الحالية.', 'The interview cannot be completed in its current state.'),
+                        'status' => $lockedInterview->status,
+                        'total_questions' => $totalQuestions,
+                        'answered_count' => $answeredCount,
+                    ];
+                }
+
+                if (!$alreadyCompleted) {
+                    $lockedInterview->forceFill([
+                        'status' => Interview::STATUS_COMPLETED,
+                        'completed_at' => now(),
+                        'last_activity_at' => now(),
+                    ])->save();
+                }
+
+                $answeredQuestionIds = $lockedInterview->answers()
+                    ->pluck('question_id');
+
+                if ($answeredQuestionIds->isNotEmpty()) {
+                    Question::query()
+                        ->where('interview_id', $lockedInterview->id)
+                        ->whereIn('id', $answeredQuestionIds)
+                        ->whereNotIn('status', [
+                            Question::STATUS_PROCESSING,
+                            Question::STATUS_EVALUATED,
+                        ])
+                        ->update([
+                            'status' => Question::STATUS_ANSWERED,
+                            'answered_at' => now(),
+                        ]);
+                }
+
+                return [
+                    'completed' => true,
+                    'already_completed' => $alreadyCompleted,
+                    'http_status' => 200,
+                    'message' => $alreadyCompleted
+                        ? $this->message(app()->getLocale(), 'تم تسجيل إنهاء المقابلة مسبقاً.', 'Interview completion was already recorded.')
+                        : $this->message(app()->getLocale(), 'تم إنهاء المقابلة بنجاح.', 'Interview completed successfully.'),
+                    'interview_id' => $lockedInterview->id,
+                    'status' => $lockedInterview->fresh()->status,
+                    'total_questions' => $totalQuestions,
+                    'answered_count' => $answeredCount,
+                ];
+            }, 3);
+
+            if (!($completion['completed'] ?? false)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $completion['message'],
+                    'data' => $completion,
+                ], $completion['http_status'] ?? 400);
             }
 
-            DB::commit();
+            $reportGeneration = $this->finalReportCoordinator->dispatchIfReady(
+                $interview->id,
+                'interview_completed'
+            );
 
-            $evaluatedCount = $interview->answers()->where('status', 'evaluated')->count();
-            $allAnswersProcessed = $interview->hasAllAnswersProcessed();
+            $freshInterview = Interview::query()->findOrFail($interview->id);
+            $evaluatedCount = $freshInterview->answers()
+                ->where('status', 'evaluated')
+                ->count();
 
-            Log::info('Interview completed successfully', [
-                'interview_id' => $interview->id,
-                'total_questions' => $totalQuestions,
-                'answered_count' => $answeredCount,
-                'evaluated_count' => $evaluatedCount,
-                'all_answers_processed' => $allAnswersProcessed,
-                'pending_questions_marked' => $pendingQuestions->count()
+            Log::info('Interview completion recorded and final report checked', [
+                'interview_id' => $freshInterview->id,
+                'completion' => $completion,
+                'report_generation' => $reportGeneration,
             ]);
 
             return response()->json([
                 'success' => true,
-                'message' => 'Interview completed successfully. Report will be generated automatically after all answers are evaluated.',
+                'message' => $this->message(app()->getLocale(), 'تم إنهاء المقابلة بنجاح ويجري الآن إعداد التقرير النهائي.', 'The interview was completed successfully and the final report is being prepared.'),
                 'data' => [
-                    'interview_id' => $interview->id,
-                    'status' => 'completed',
-                    'total_questions' => $totalQuestions,
-                    'answered_count' => $answeredCount,
+                    'interview_id' => $freshInterview->id,
+                    'status' => $freshInterview->status,
+                    'total_questions' => $completion['total_questions'],
+                    'answered_count' => $completion['answered_count'],
                     'evaluated_count' => $evaluatedCount,
-                    'all_answers_evaluated' => $allAnswersProcessed,
-                    'pending_questions_marked' => $pendingQuestions->count(),
-                    'estimated_time_seconds' => $allAnswersProcessed ? 60 : 120,
+                    'all_answers_evaluated' =>
+                        $evaluatedCount >= $completion['total_questions'],
+                    'report_ready' => $freshInterview->finalReport()->exists(),
+                    'report_generation' => $reportGeneration,
+                    'estimated_time_seconds' =>
+                        $evaluatedCount >= $completion['total_questions'] ? 60 : 120,
                 ],
             ]);
-
-        } catch (\Exception $e) {
-            DB::rollBack();
-            Log::error('Failed to complete interview: ' . $e->getMessage(), [
+        } catch (\Throwable $exception) {
+            Log::error('Failed to complete interview', [
                 'interview_id' => $interview->id,
-                'trace' => $e->getTraceAsString()
+                'error' => $exception->getMessage(),
+                'trace' => $exception->getTraceAsString(),
             ]);
 
             return response()->json([
                 'success' => false,
-                'message' => 'Failed to complete interview: ' . $e->getMessage(),
+                'message' => $this->message(app()->getLocale(), 'تعذر إنهاء المقابلة: ', 'Failed to complete the interview: ') . $exception->getMessage(),
             ], 500);
         }
     }
@@ -296,20 +375,33 @@ public function store(StoreInterviewRequest $request)
      */
     public function checkFinalStatus(Interview $interview): JsonResponse
     {
-        // Gate::authorize('view', $interview);
+        Gate::authorize('view', $interview);
+        $this->useInterviewLocale($interview);
 
-        $hasReport = $interview->finalReport()->exists();
-        $allAnswersProcessed = $interview->hasAllAnswersProcessed();
+        $reportGeneration = $this->finalReportCoordinator->dispatchIfReady(
+            $interview->id,
+            'status_poll'
+        );
+
+        $freshInterview = Interview::query()->findOrFail($interview->id);
+        $hasReport = $freshInterview->finalReport()->exists();
+        $totalQuestions = $freshInterview->questions()->count();
+        $evaluatedAnswers = $freshInterview->answers()
+            ->where('status', 'evaluated')
+            ->count();
 
         return response()->json([
             'success' => true,
             'data' => [
-                'interview_id' => $interview->id,
-                'status' => $interview->status,
+                'interview_id' => $freshInterview->id,
+                'status' => $freshInterview->status,
                 'report_ready' => $hasReport,
-                'all_answers_processed' => $allAnswersProcessed,
-                'answers_processed' => $interview->answers()->where('status', 'evaluated')->count(),
-                'total_answers' => $interview->answers()->count(),
+                'all_answers_processed' =>
+                    $totalQuestions > 0 && $evaluatedAnswers >= $totalQuestions,
+                'answers_processed' => $evaluatedAnswers,
+                'total_answers' => $freshInterview->answers()->count(),
+                'total_questions' => $totalQuestions,
+                'report_generation' => $reportGeneration,
             ],
         ]);
     }
@@ -319,14 +411,21 @@ public function store(StoreInterviewRequest $request)
      */
     public function getFinalReport(Interview $interview): JsonResponse
     {
-        // Gate::authorize('view', $interview);
+        Gate::authorize('view', $interview);
+        $this->useInterviewLocale($interview);
 
         $report = $interview->finalReport;
 
         if (!$report) {
+            $reportGeneration = $this->finalReportCoordinator->dispatchIfReady(
+                $interview->id,
+                'report_fetch'
+            );
+
             return response()->json([
                 'success' => false,
-                'message' => 'Final report not yet available',
+                'message' => $this->message(app()->getLocale(), 'التقرير النهائي غير جاهز بعد.', 'The final report is not available yet.'),
+                'generation' => $reportGeneration,
             ], 404);
         }
 
@@ -359,36 +458,54 @@ public function store(StoreInterviewRequest $request)
     }
 
     /**
- * Check if report is ready (polling endpoint)
- */
-public function checkReportReady(Interview $interview): JsonResponse
-{
-    Gate::authorize('view', $interview);
+     * Check if report is ready (polling endpoint)
+     */
+    public function checkReportReady(Interview $interview): JsonResponse
+    {
+        Gate::authorize('view', $interview);
+        $this->useInterviewLocale($interview);
 
-    $report = $interview->finalReport;
-     $allProcessed = $interview->hasAllAnswersProcessed();
-    $evaluationsCount = $interview->evaluations()->count();
-    $totalQuestions = $interview->questions()->count();
+        $reportGeneration = $this->finalReportCoordinator->dispatchIfReady(
+            $interview->id,
+            'report_ready_poll'
+        );
 
-    return response()->json([
-        'success' => true,
-        'ready' => $report !== null,
-        'data' => $report ? new FinalReportResource($report) : null,
-        'status' => $interview->status,
-        'debug' => [  // ✅ هذه المعلومات تساعدك تعرف وين المشكلة
-            'report_exists' => $report !== null,
-            'all_answers_processed' => $allProcessed,
-            'evaluations_count' => $evaluationsCount,
-            'total_questions' => $totalQuestions,
-            'interview_status' => $interview->status,
-            'answers_status' => $interview->answers()
-                ->select('status')
-                ->get()
-                ->pluck('status')
-                ->toArray()
-        ]
-    ]);
-}
+        $freshInterview = Interview::query()
+            ->with('finalReport')
+            ->findOrFail($interview->id);
+
+        $report = $freshInterview->finalReport;
+        $totalQuestions = $freshInterview->questions()->count();
+        $answersStatus = $freshInterview->answers()
+            ->pluck('status')
+            ->values()
+            ->all();
+        $evaluatedAnswers = $freshInterview->answers()
+            ->where('status', 'evaluated')
+            ->count();
+        $failedAnswers = $freshInterview->answers()
+            ->where('status', 'failed')
+            ->count();
+
+        return response()->json([
+            'success' => true,
+            'ready' => $report !== null,
+            'data' => $report ? new FinalReportResource($report) : null,
+            'status' => $freshInterview->status,
+            'generation' => $reportGeneration,
+            'progress' => [
+                'report_exists' => $report !== null,
+                'evaluated_answers' => $evaluatedAnswers,
+                'failed_answers' => $failedAnswers,
+                'evaluations_count' => $freshInterview->evaluations()->count(),
+                'audio_analyses_count' => $freshInterview->answers()
+                    ->whereHas('audioAnalysis')
+                    ->count(),
+                'total_questions' => $totalQuestions,
+                'answers_status' => $answersStatus,
+            ],
+        ]);
+    }
 
 
     /**
@@ -400,6 +517,7 @@ public function checkReportReady(Interview $interview): JsonResponse
     public function resume(Interview $interview): JsonResponse
     {
         Gate::authorize('view', $interview);
+        $this->useInterviewLocale($interview);
 
         // Check if interview is already completed
         if (in_array($interview->status, [
@@ -409,7 +527,7 @@ public function checkReportReady(Interview $interview): JsonResponse
         ])) {
             return response()->json([
                 'success' => true,
-                'message' => 'Interview is already completed',
+                'message' => $this->message(app()->getLocale(), 'المقابلة مكتملة بالفعل.', 'Interview is already completed.'),
                 'data' => $interview->getResumeData(),
             ]);
         }
@@ -421,7 +539,7 @@ public function checkReportReady(Interview $interview): JsonResponse
 
             return response()->json([
                 'success' => false,
-                'message' => 'Interview session has expired. Please start a new interview.',
+                'message' => $this->message(app()->getLocale(), 'انتهت صلاحية جلسة المقابلة. يرجى بدء مقابلة جديدة.', 'The interview session has expired. Please start a new interview.'),
                 'data' => $interview->getResumeData(),
             ], 410);
         }
@@ -449,7 +567,7 @@ public function checkReportReady(Interview $interview): JsonResponse
 
         return response()->json([
             'success' => true,
-            'message' => 'Interview resumed successfully',
+            'message' => $this->message(app()->getLocale(), 'تم استئناف المقابلة بنجاح.', 'The interview was resumed successfully.'),
             'data' => $interview->getResumeData(),
         ]);
     }
@@ -461,6 +579,7 @@ public function checkReportReady(Interview $interview): JsonResponse
     public function canResume(Interview $interview): JsonResponse
     {
         Gate::authorize('view', $interview);
+        $this->useInterviewLocale($interview);
 
         // Check if interview is in progress
         if ($interview->status !== Interview::STATUS_IN_PROGRESS) {
@@ -503,13 +622,14 @@ public function checkReportReady(Interview $interview): JsonResponse
     }
 
 
-        /**
+    /**
      * 🔹 NEW: Get lock status for an interview
      * GET /api/interviews/{interview}/lock-status
      */
     public function lockStatus(Interview $interview, Request $request): JsonResponse
     {
         Gate::authorize('view', $interview);
+        $this->useInterviewLocale($interview);
 
         $sessionId = $request->header('X-Session-Id') ?? $request->input('session_id');
 
@@ -528,6 +648,7 @@ public function checkReportReady(Interview $interview): JsonResponse
     public function lock(Request $request, Interview $interview): JsonResponse
     {
         Gate::authorize('update', $interview);
+        $this->useInterviewLocale($interview);
 
         $request->validate([
             'session_id' => 'required|string|max:64',
@@ -553,7 +674,7 @@ public function checkReportReady(Interview $interview): JsonResponse
 
         return response()->json([
             'success' => true,
-            'message' => 'Interview locked successfully',
+            'message' => $this->message(app()->getLocale(), 'تم حجز جلسة المقابلة لهذا التبويب بنجاح.', 'The interview session was locked successfully.'),
             'data' => [
                 'locked' => true,
                 'session_id' => $interview->active_session_id,
@@ -569,6 +690,7 @@ public function checkReportReady(Interview $interview): JsonResponse
     public function unlock(Request $request, Interview $interview): JsonResponse
     {
         Gate::authorize('update', $interview);
+        $this->useInterviewLocale($interview);
 
         $sessionId = $request->header('X-Session-Id') ?? $request->input('session_id');
 
@@ -576,7 +698,7 @@ public function checkReportReady(Interview $interview): JsonResponse
         if (!$interview->isLockedBySession($sessionId)) {
             return response()->json([
                 'success' => false,
-                'message' => 'You do not own the lock for this interview',
+                'message' => $this->message(app()->getLocale(), 'هذه الجلسة لا تملك قفل المقابلة.', 'This session does not own the interview lock.'),
             ], 403);
         }
 
@@ -584,7 +706,7 @@ public function checkReportReady(Interview $interview): JsonResponse
 
         return response()->json([
             'success' => true,
-            'message' => 'Interview unlocked successfully',
+            'message' => $this->message(app()->getLocale(), 'تم تحرير قفل المقابلة بنجاح.', 'The interview lock was released successfully.'),
             'data' => [
                 'locked' => false,
             ],
@@ -598,6 +720,7 @@ public function checkReportReady(Interview $interview): JsonResponse
     public function refreshLock(Request $request, Interview $interview): JsonResponse
     {
         Gate::authorize('update', $interview);
+        $this->useInterviewLocale($interview);
 
         $sessionId = $request->header('X-Session-Id') ?? $request->input('session_id');
 
@@ -605,7 +728,7 @@ public function checkReportReady(Interview $interview): JsonResponse
         if (!$interview->isLockedBySession($sessionId)) {
             return response()->json([
                 'success' => false,
-                'message' => 'You do not own the lock for this interview',
+                'message' => $this->message(app()->getLocale(), 'هذه الجلسة لا تملك قفل المقابلة.', 'This session does not own the interview lock.'),
             ], 403);
         }
 
@@ -613,7 +736,7 @@ public function checkReportReady(Interview $interview): JsonResponse
 
         return response()->json([
             'success' => true,
-            'message' => 'Lock refreshed successfully',
+            'message' => $this->message(app()->getLocale(), 'تم تحديث قفل المقابلة بنجاح.', 'The interview lock was refreshed successfully.'),
             'data' => [
                 'locked' => true,
                 'session_id' => $interview->active_session_id,
@@ -622,4 +745,33 @@ public function checkReportReady(Interview $interview): JsonResponse
         ]);
     }
 
+
+
+    /**
+     * Pin Laravel's locale to the language stored on the interview.
+     */
+    private function useInterviewLocale(Interview $interview): string
+    {
+        $locale = $this->normalizeLocale($interview->locale);
+        app()->setLocale($locale);
+
+        return $locale;
+    }
+
+    /**
+     * Normalize the locale values supported by the interview flow.
+     */
+    private function normalizeLocale(?string $locale): string
+    {
+        $locale = strtolower((string) ($locale ?: app()->getLocale()));
+        return str_starts_with($locale, 'ar') ? 'ar' : 'en';
+    }
+
+    /**
+     * Return an API message in the interview language.
+     */
+    private function message(string $locale, string $arabic, string $english): string
+    {
+        return $this->normalizeLocale($locale) === 'ar' ? $arabic : $english;
+    }
 }

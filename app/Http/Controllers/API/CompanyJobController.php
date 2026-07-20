@@ -83,7 +83,7 @@ class CompanyJobController extends Controller
                 'data' => [
                     'job' => [
                         'id' => $job->id,
-                        'title' => $job->title,
+                        'title' => $job->translate('title'),
                         'unique_token' => $job->unique_token,
                         'shareable_link' => $job->getShareableLink(),
                         'expires_at' => $job->expires_at,
@@ -126,7 +126,7 @@ class CompanyJobController extends Controller
                 'data' => $jobs->map(function ($job) {
                     return [
                         'id' => $job->id,
-                        'title' => $job->title,
+                        'title' => $job->translate('title'),
                         'status' => $job->status,
                         'shareable_link' => $job->getShareableLink(),
                         'candidates_count' => $job->candidates_count,
@@ -170,8 +170,8 @@ class CompanyJobController extends Controller
                 'success' => true,
                 'data' => [
                     'id' => $job->id,
-                    'title' => $job->title,
-                    'description' => $job->description,
+                    'title' => $job->translate('title'),
+                    'description' => $job->translate('description'),
                     'required_skills' => $job->required_skills,
                     'custom_questions' => $job->custom_questions,
                     'difficulty' => $job->difficulty,
@@ -313,7 +313,7 @@ public function candidates(CompanyJob $job): JsonResponse
         return response()->json([
             'success' => true,
             'data' => [
-                'job_title' => $job->title,
+                'job_title' => $job->translate('title'),
                 'total_candidates' => $candidates->count(),
                 'candidates' => $formattedCandidates,
             ],
@@ -362,7 +362,7 @@ public function candidates(CompanyJob $job): JsonResponse
 
                         return [
                             'id' => $question->id,
-                            'text' => $question->question_text,
+                            'text' => $question->translate('question_text'),
                             'type' => $question->type,
                             'source' => $question->source,
                             'answer_transcript' => $answer?->transcription,

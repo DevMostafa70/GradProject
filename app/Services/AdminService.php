@@ -383,7 +383,7 @@ public function sendBroadcastNotification(string $title, string $message, string
         $category = JobCategory::create($data);
 
         AdminLog::log('create_category', 'category', $category->id, [
-            'category_name' => $category->name_ar,
+            'category_name' => $category->translate('name', 'en')
         ]);
 
         return $category;
@@ -394,13 +394,13 @@ public function sendBroadcastNotification(string $title, string $message, string
      */
     public function updateJobCategory(JobCategory $category, array $data): JobCategory
     {
-        $oldName = $category->name_ar;
+        $oldName = $category->translate('name', 'en');
 
         $category->update($data);
 
         AdminLog::log('update_category', 'category', $category->id, [
             'old_name' => $oldName,
-            'new_name' => $category->name_ar,
+            'new_name' => $category->translate('name', 'en'),
         ]);
 
         return $category;

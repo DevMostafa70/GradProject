@@ -37,8 +37,9 @@ class AdminCategoryController extends Controller
     public function store(Request $request): JsonResponse
     {
         $request->validate([
-            'name_ar' => 'required|string|unique:job_categories',
-            'name_en' => 'nullable|string',
+            'name' => 'required|array',
+            'name.en' => 'required|string|max:255',
+            'name.ar' => 'required|string|max:255',
             'icon' => 'nullable|string',
             'color' => 'nullable|string',
             'sort_order' => 'nullable|integer',
@@ -59,8 +60,9 @@ class AdminCategoryController extends Controller
     public function update(Request $request, JobCategory $category): JsonResponse
     {
         $request->validate([
-            'name_ar' => 'required|string|unique:job_categories,name_ar,' . $category->id,
-            'name_en' => 'nullable|string',
+            'name' => 'required|array',
+            'name.en' => 'required|string|max:255',
+            'name.ar' => 'required|string|max:255',
             'icon' => 'nullable|string',
             'color' => 'nullable|string',
             'sort_order' => 'nullable|integer',

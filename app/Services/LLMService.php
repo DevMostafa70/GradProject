@@ -36,7 +36,7 @@ class LLMService
 
             $content = $response->choices[0]->message->content;
             $questions = json_decode($content, true);
-            return $this->validateAndFormatQuestions($questions, $interview->number_of_questions);
+            return $this->validateAndFormatQuestions($questions, $interview);
         } catch (\Exception $e) {
             logger($e->getMessage());
             // Fallback questions if AI fails
@@ -51,8 +51,12 @@ class LLMService
     /**
      * Generate questions from custom prompt
      */
-    public function generateQuestionsFromPrompt(string $prompt, int $expectedCount): array
+    public function generateQuestionsFromPrompt(string $prompt, int $expectedCount, ?string $locale = null): array
     {
+        $locale = $this->normalizeLocale($locale);
+        $language = $this->languageName($locale);
+        $prompt = "{$prompt}\n\nLANGUAGE REQUIREMENT: Write every user-facing text value in {$language}. Return valid JSON only.";
+
         try {
             $response = OpenAI::chat()->create([
                 'model' => 'gpt-4o-mini',
@@ -74,28 +78,37 @@ class LLMService
             $data = json_decode($content, true);
 
             if (!isset($data['questions']) || count($data['questions']) !== $expectedCount) {
-                return $this->getFallbackQuestionsFromPrompt($expectedCount);
+                return $this->getFallbackQuestionsFromPrompt($expectedCount, $locale);
             }
 
             return $data;
         } catch (\Exception $e) {
-            return $this->getFallbackQuestionsFromPrompt($expectedCount);
+            return $this->getFallbackQuestionsFromPrompt($expectedCount, $locale);
         }
     }
 
     /**
      * Fallback for prompt-based questions
      */
-    private function getFallbackQuestionsFromPrompt(int $count): array
+    private function getFallbackQuestionsFromPrompt(int $count, ?string $locale = null): array
     {
         $questions = [];
-        $templates = [
-            "Tell me about a challenging technical problem you solved recently.",
-            "How do you stay updated with the latest technologies?",
-            "Describe your experience working in a team environment.",
-            "What's your approach to writing clean, maintainable code?",
-            "How do you handle constructive criticism?"
-        ];
+        $locale = $this->normalizeLocale($locale);
+        $templates = $locale === 'ar'
+            ? [
+                "حدثني عن مشكلة تقنية صعبة حللتها مؤخرًا.",
+                "كيف تتابع أحدث التقنيات والتطورات في مجالك؟",
+                "صف خبرتك في العمل ضمن فريق.",
+                "ما منهجك في كتابة كود نظيف وسهل الصيانة؟",
+                "كيف تتعامل مع النقد البنّاء؟",
+            ]
+            : [
+                "Tell me about a challenging technical problem you solved recently.",
+                "How do you stay updated with the latest technologies?",
+                "Describe your experience working in a team environment.",
+                "What's your approach to writing clean, maintainable code?",
+                "How do you handle constructive criticism?",
+            ];
 
         for ($i = 0; $i < $count; $i++) {
             $questions[] = [
@@ -125,6 +138,9 @@ class LLMService
      */
     public function evaluateAnswerWithSource(string $question, string $answer, string $source, array $context = []): array
     {
+        $locale = $this->normalizeLocale($context['locale'] ?? null);
+        $language = $this->languageName($locale);
+
         // بناء سياق إضافي حسب مصدر السؤال
         $sourceContext = '';
         $evaluationFocus = '';
@@ -173,7 +189,7 @@ QUESTION: {$question}
 
 CANDIDATE'S ANSWER: {$answer}
 
-Analyze the answer carefully and return a JSON response with the following structure:
+Analyze the answer carefully. Write every user-facing text value in {$language}, while keeping JSON keys exactly as specified. Return a JSON response with the following structure:
 
 {
     "score": 0-10 (overall score for this answer),
@@ -223,9 +239,9 @@ EOT;
 
             return [
                 'score' => 5,
-                'strengths' => ['Answer was provided'],
-                'weaknesses' => ['Unable to perform full analysis due to technical issue'],
-                'feedback' => 'Please review this answer manually. The automated evaluation system encountered an issue.',
+                'strengths' => [$this->localizedText($locale, 'تم تقديم إجابة.', 'An answer was provided.')],
+                'weaknesses' => [$this->localizedText($locale, 'تعذر إجراء التحليل الكامل بسبب مشكلة تقنية.', 'Unable to perform full analysis due to a technical issue.')],
+                'feedback' => $this->localizedText($locale, 'يرجى مراجعة هذه الإجابة يدويًا، واجه نظام التقييم الآلي مشكلة تقنية.', 'Please review this answer manually. The automated evaluation system encountered an issue.'),
                 'clarity_score' => 5,
                 'relevance_score' => 5,
                 'depth_score' => 5,
@@ -287,12 +303,17 @@ EOT;
     public function generateQuestionsForJob($job, $interview): array
     {
         $skillsList = implode(', ', $job->required_skills);
+        $locale = $this->normalizeLocale($interview->locale ?? null);
+        $language = $this->languageName($locale);
 
         $prompt = <<<EOT
 Generate {$job->number_of_questions} interview questions for a {$job->title} position.
 
 Required skills: {$skillsList}
 Difficulty level: {$job->difficulty}
+Question language: {$language}
+
+Write every user-facing text value in {$language}. Keep JSON keys and enum values in English.
 
 Format the response as a JSON object with a 'questions' array. Each question should have:
 - question_text: The actual question
@@ -323,27 +344,27 @@ EOT;
             $content = $response->choices[0]->message->content;
             $questionsData = json_decode($content, true);
 
-            return $this->formatQuestionsForJob($questionsData, $job);
+            return $this->formatQuestionsForJob($questionsData, $job, $locale);
         } catch (\Exception $e) {
             Log::error('generateQuestionsForJob failed: ' . $e->getMessage());
-            return $this->getFallbackQuestionsForJob($job);
+            return $this->getFallbackQuestionsForJob($job, $locale);
         }
     }
 
     /**
      * Format questions for job
      */
-    private function formatQuestionsForJob(array $data, $job): array
+    private function formatQuestionsForJob(array $data, $job, ?string $locale = null): array
     {
         $formatted = [];
 
         if (!isset($data['questions']) || empty($data['questions'])) {
-            return $this->getFallbackQuestionsForJob($job);
+            return $this->getFallbackQuestionsForJob($job, $locale);
         }
 
         foreach ($data['questions'] as $index => $question) {
             $formatted[] = [
-                'question_text' => $question['question_text'] ?? 'Please describe your experience.',
+                'question_text' => $question['question_text'] ?? $this->localizedText($this->normalizeLocale($locale), 'يرجى وصف خبرتك.', 'Please describe your experience.'),
                 'type' => $question['type'] ?? 'technical',
                 'expected_skills' => $question['expected_skills'] ?? $job->required_skills,
                 'evaluation_criteria' => $question['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
@@ -357,18 +378,27 @@ EOT;
     /**
      * Fallback questions for job
      */
-    private function getFallbackQuestionsForJob($job): array
+    private function getFallbackQuestionsForJob($job, ?string $locale = null): array
     {
         $questions = [];
-        $skill = $job->required_skills[0] ?? 'software development';
+        $locale = $this->normalizeLocale($locale);
+        $skill = $job->required_skills[0] ?? $this->localizedText($locale, 'تطوير البرمجيات', 'software development');
 
-        $templates = [
-            "Tell me about your experience with {$skill}.",
-            "What's the most challenging project you've worked on using {$skill}?",
-            "How do you stay updated with the latest developments in {$skill}?",
-            "Describe a time you had to debug a complex issue.",
-            "How do you approach learning new technologies?"
-        ];
+        $templates = $locale === 'ar'
+            ? [
+                "حدثني عن خبرتك في {$skill}.",
+                "ما أصعب مشروع عملت عليه باستخدام {$skill}؟",
+                "كيف تتابع أحدث التطورات في {$skill}؟",
+                "صف موقفًا اضطررت فيه إلى تصحيح مشكلة معقدة.",
+                "كيف تتعامل مع تعلم تقنيات جديدة؟",
+            ]
+            : [
+                "Tell me about your experience with {$skill}.",
+                "What's the most challenging project you've worked on using {$skill}?",
+                "How do you stay updated with the latest developments in {$skill}?",
+                "Describe a time you had to debug a complex issue.",
+                "How do you approach learning new technologies?",
+            ];
 
         for ($i = 0; $i < $job->number_of_questions; $i++) {
             $questions[] = [
@@ -549,6 +579,10 @@ EOT;
         array $violationSummary,
         float $cheatingSeverityScore
     ): array {
+        $locale = $this->normalizeLocale($interview->locale ?? null);
+        $language = $this->languageName($locale);
+        app()->setLocale($locale);
+
         $prompt = $this->buildFinalReportPrompt(
             $interview,
             $answers,
@@ -563,7 +597,7 @@ EOT;
                 'messages' => [
                     [
                         'role' => 'system',
-                        'content' => 'You are an expert hiring manager and interview evaluator. Provide comprehensive, fair, and constructive feedback. IMPORTANT: Apply penalties for any detected cheating behavior.'
+                        'content' => "You are an expert hiring manager and interview evaluator. Provide comprehensive, fair, and constructive feedback in {$language}. Describe integrity concerns but do not calculate or apply score penalties; the application applies the penalty deterministically."
                     ],
                     [
                         'role' => 'user',
@@ -592,21 +626,414 @@ EOT;
     {
 
         $skillsList = implode(', ', $interview->skills);
+        $locale = $this->normalizeLocale($interview->locale ?? null);
+        $language = $this->languageName($locale);
 
         return <<<EOT
-Generate {$interview->number_of_questions} interview questions for a {$interview->experience_level} level {$interview->position} position.
+You are a senior technical interviewer and HR expert with 15+ years of experience across multiple industries. You design real-world interview questions used in professional hiring processes.
 
-Required skills: {$skillsList}
-Difficulty level: {$interview->difficulty}
+Your task is to generate high-quality, realistic, structured interview questions for a global AI-powered interview preparation platform.
 
-Format the response as a JSON object with a 'questions' array. Each question should have:
-- question_text: The actual question
-- type: One of ['technical', 'behavioral', 'situational', 'general']
-- expected_skills: Array of skills this question evaluates
-- evaluation_criteria: Array of key points to evaluate in the answer
-- order: Question number (1-based)
+---
 
-Ensure a mix of question types and cover the required skills appropriately.
+## INPUT PARAMETERS
+
+- Job Position: {$interview->position}
+- Experience Level: {$interview->experience_level}
+- Required Skills: {$skillsList}
+- Difficulty Level (1-10): {$interview->difficulty}
+- Number of Questions: {$interview->number_of_questions}
+- Question Language: {$language}
+
+---
+
+# CORE OBJECTIVE
+
+Generate exactly {$interview->number_of_questions} interview questions that simulate a real professional hiring interview.
+
+The interview must evaluate:
+- Technical knowledge
+- Problem-solving ability
+- Communication skills
+- Decision-making
+- Real-world experience
+- Behavioral patterns
+
+Questions must feel like they were created by a professional interviewer from a real company.
+
+---
+
+# QUESTION DISTRIBUTION RULES
+
+Adapt distribution based on the role, but follow this default:
+
+- Technical / Functional: 40–50%
+- Behavioral: 25–30%
+- Situational: 15–20%
+- General / HR: 5–10%
+
+For non-technical roles:
+Replace technical questions with role-specific functional questions.
+
+---
+
+# DIFFICULTY RULES (STRICT)
+
+Difficulty scale: 1-10
+
+Must align with experience level:
+
+Entry:
+1–4
+
+Junior:
+3–6
+
+Mid-Level:
+5–7
+
+Senior:
+6–9
+
+Lead / Executive:
+7–10
+
+
+Rules:
+- Average difficulty must be close to the provided difficulty level (±1 allowed).
+- Include natural difficulty variation.
+- Avoid generating all questions with the same difficulty.
+
+---
+
+# SKILLS COVERAGE RULE
+
+- All required skills MUST appear at least once.
+- Critical skills should be evaluated multiple times using different question styles.
+- Avoid repeating the same skill in identical contexts.
+- Each question should include relevant skill_tags.
+
+---
+
+# QUESTION QUALITY REQUIREMENTS
+
+Questions MUST:
+
+- Represent real company interview scenarios.
+- Avoid textbook-only questions.
+- Test practical knowledge and decision-making.
+- Be clear, concise, and professionally written.
+- Encourage detailed answers when required.
+- Avoid duplicate or very similar questions.
+
+---
+
+# SAFETY & COMPLIANCE RULES (STRICT)
+
+DO NOT include:
+
+- Age-related questions
+- Gender-related questions
+- Religion
+- Nationality
+- Marital status
+- Disability
+- Pregnancy
+- Political views
+- Illegal or discriminatory topics
+- Personal questions unrelated to job performance
+
+
+---
+
+# INDUSTRY ADAPTATION RULES
+
+Technical roles:
+- Algorithms
+- Debugging
+- Architecture
+- System design
+- Performance optimization
+
+Data roles:
+- SQL
+- Analytics
+- Statistics
+- Data interpretation
+- Experiment design
+
+Business roles:
+- Strategy
+- Leadership
+- Stakeholder management
+
+Creative roles:
+- Portfolio review
+- Ideation
+- Design decisions
+
+Sales roles:
+- Negotiation
+- Communication
+- Objection handling
+
+Executive roles:
+- Vision
+- Strategy
+- Crisis management
+
+
+---
+
+# EXPERIENCE LEVEL BEHAVIOR MODEL
+
+Entry:
+- Learning ability
+- Basic understanding
+- Following instructions
+
+Junior:
+- Core skills
+- Team collaboration
+- Basic problem solving
+
+Mid-Level:
+- Independent execution
+- Technical decisions
+- Ownership
+
+Senior:
+- Advanced expertise
+- Architecture decisions
+- Mentoring
+
+Lead:
+- Team impact
+- Technical leadership
+- Strategic thinking
+
+Executive:
+- Business strategy
+- Organization decisions
+
+
+---
+
+# ANSWER TIME ALLOCATION ENGINE (VERY IMPORTANT)
+
+For every question, calculate a realistic answer duration.
+
+The timer must simulate a real professional interview:
+
+- Give enough time for the candidate to provide a complete answer.
+- Create moderate pressure similar to real hiring interviews.
+- Do not make the timer too short.
+- Do not make the timer unnecessarily long.
+- The candidate should feel challenged but treated fairly.
+
+
+The value of `time_allocation_seconds` MUST depend on:
+
+## Question Type
+
+Simple introduction / basic knowledge:
+45–90 seconds
+
+Technical explanation:
+90–180 seconds
+
+Debugging / problem solving:
+150–300 seconds
+
+Behavioral questions using STAR method:
+120–240 seconds
+
+Situational decision-making:
+180–300 seconds
+
+System design / architecture:
+300–600 seconds
+
+
+## Difficulty Adjustment
+
+Difficulty 1-3:
+45–120 seconds
+
+Difficulty 4-6:
+90–180 seconds
+
+Difficulty 7-8:
+180–300 seconds
+
+Difficulty 9-10:
+300–600 seconds
+
+
+## Experience Level Adjustment
+
+Entry / Junior:
+- Give slightly more time.
+- Allow candidates to explain their reasoning.
+
+Mid-Level:
+- Balanced timing.
+- Expect confident structured answers.
+
+Senior / Lead:
+- Increase pressure.
+- Expect concise answers with clear decisions and trade-offs.
+
+
+## Timer Philosophy
+
+The timer should simulate a real interview:
+
+- Candidate should normally finish with around 10–20 seconds remaining.
+- Avoid giving unlimited thinking time.
+- Avoid forcing incomplete answers.
+- Complex questions must always receive more time than simple questions.
+- Different questions MUST have different time allocations.
+
+
+Examples:
+
+Question:
+"Explain React hooks and their common use cases."
+
+Expected:
+90–120 seconds
+
+
+Question:
+"How would you debug performance issues in a large React application?"
+
+Expected:
+180–240 seconds
+
+
+Question:
+"Design the architecture of a scalable e-commerce platform."
+
+Expected:
+420–600 seconds
+
+
+Question:
+"Describe a conflict with a teammate and how you solved it."
+
+Expected:
+150–240 seconds
+
+
+---
+
+# LANGUAGE RULES (STRICT)
+
+Write these fields in {$language}:
+
+- question_text
+- category
+- evaluation_criteria
+- strong_answer_indicators
+- real_world_context
+
+
+Keep JSON keys and enum values in English:
+
+Examples:
+technical
+behavioral
+situational
+general
+
+
+Do not return bilingual objects.
+
+---
+
+# OUTPUT FORMAT (STRICT JSON ONLY)
+
+Return ONLY a valid JSON object:
+
+{
+  "questions": [
+    {
+      "id": "string",
+      "order": 1,
+      "question_text": "string",
+      "type": "technical | behavioral | situational | general",
+      "category": "string",
+      "difficulty_score": 1,
+      "expected_skills": [
+        "string"
+      ],
+      "evaluation_criteria": [
+        "string"
+      ],
+      "strong_answer_indicators": [
+        "string"
+      ],
+      "time_allocation_seconds": 120,
+      "skill_tags": [
+        "string"
+      ],
+      "real_world_context": "string"
+    }
+  ],
+  "metadata": {
+    "total_questions": {$interview->number_of_questions},
+    "position": "{$interview->position}",
+    "experience_level": "{$interview->experience_level}",
+    "average_difficulty": 0,
+    "question_type_distribution": {
+      "technical": 0,
+      "behavioral": 0,
+      "situational": 0,
+      "general": 0
+    },
+    "skills_covered": [
+      "string"
+    ],
+    "generation_timestamp": "ISO-8601"
+  }
+}
+
+
+---
+
+# FINAL VALIDATION (MANDATORY)
+
+Before returning the JSON:
+
+✔ Generate exactly {$interview->number_of_questions} questions
+
+✔ Every required field exists
+
+✔ JSON is valid and parseable
+
+✔ No markdown or explanation outside JSON
+
+✔ All required skills are covered
+
+✔ Difficulty matches experience level
+
+✔ No duplicate questions
+
+✔ Question types are balanced
+
+✔ Every question has a realistic time_allocation_seconds value
+
+✔ Time allocation varies between questions
+
+✔ Difficult questions receive more time than simple questions
+
+✔ Timer creates realistic interview pressure without being unfair
+
+
+---
+
+Now generate the interview questions.
 EOT;
     }
 
@@ -620,6 +1047,8 @@ EOT;
         array $violationSummary,
         float $cheatingSeverityScore
     ): string {
+        $locale = $this->normalizeLocale($interview->locale ?? null);
+        $language = $this->languageName($locale);
         $answersData = [];
         foreach ($answers as $index => $answer) {
             $question = $answer->question;
@@ -627,7 +1056,7 @@ EOT;
 
             $answersData[] = [
                 'question_number' => $index + 1,
-                'question' => $question->question_text,
+                'question' => $question->textForLocale($locale),
                 'type' => $question->type,
                 'answer_transcript' => $answer->transcription,
                 'score' => $evaluation ? $evaluation->score : 0,
@@ -655,7 +1084,7 @@ EOT;
                 $violationContext .= "\n- {$violation['violation_type']}: {$violation['count']} occurrences, {$violation['total_duration']}s total duration";
             }
 
-            $violationContext .= "\n\nIMPORTANT: You MUST apply appropriate score penalties for detected cheating. The severity score of {$cheatingSeverityScore}/10 should result in a proportional score reduction. Candidates who cheat should receive lower overall evaluations, especially in integrity-related areas.";
+            $violationContext .= "\n\nIMPORTANT: Describe the integrity concerns and their implications, but do not calculate or apply a score penalty. The application calculates the adjusted score deterministically.";
         }
 
         $answersJson = json_encode($answersData, JSON_PRETTY_PRINT);
@@ -824,10 +1253,10 @@ Critical report generation rules:
     ]
 }
 9. overall_score must be calculated from the actual individual question scores, not from general impressions.
-10. adjusted_score must equal overall_score if no cheating or violation was detected.
-11. adjusted_score must be lower than overall_score if cheating or violations were detected.
-12. The severity of cheating or violations must proportionally reduce the adjusted_score.
-13. Cheating penalties must not increase any score.
+10. Set adjusted_score equal to overall_score. The application will calculate the final integrity-adjusted score.
+11. Describe violations objectively without changing the content score.
+12. Do not calculate a cheating penalty.
+13. Cheating information must not increase any score.
 14. Audio metrics may affect communication_score and confidence-related interpretation only.
 15. Audio metrics must not compensate for missing, irrelevant, or weak answer content.
 16. A confident voice with an empty or irrelevant answer must still receive a low final score.
@@ -846,7 +1275,7 @@ Critical report generation rules:
 25. Do not use strings for numeric scores.
 
 Educational feedback rules:
-26. educational_summary MUST be in English and educational in nature.
+26. educational_summary MUST be in {$language} and educational in nature.
 27. key_strengths and key_weaknesses MUST be based on actual answers (not generic).
 28. Each strength/weakness MUST include a real example from the answer.
 29. improvement_plan MUST have 3-5 actionable steps with clear action items.
@@ -857,6 +1286,7 @@ Educational feedback rules:
 34. Use the actual answer content to personalize feedback.
 35. If cheating was detected, include a note about integrity in educational_summary.
 
+Write every user-facing report text value in {$language}. Keep JSON keys unchanged.
 Return valid JSON only.
 EOT;
     }
@@ -865,33 +1295,38 @@ EOT;
     /**
      * Validate and format AI-generated questions
      */
-private function validateAndFormatQuestions(array $data, int $expectedCount): array
-{
-    if (!isset($data['questions']) || count($data['questions']) !== $expectedCount) {
-        return $this->getFallbackQuestions(Interview::find(1));
+    private function validateAndFormatQuestions(array $data, Interview $interview): array
+    {
+        if (!isset($data['questions']) || count($data['questions']) !== (int) $interview->number_of_questions) {
+            return $this->getFallbackQuestions($interview);
+        }
+
+        $formatted = [];
+        foreach ($data['questions'] as $index => $question) {
+            $questionText = $question['question_text'] ?? null;
+
+            if (is_array($questionText)) {
+                $locale = $this->normalizeLocale($interview->locale ?? null);
+                $questionText = $questionText[$locale] ?? $questionText['en'] ?? $questionText['ar'] ?? reset($questionText);
+            }
+
+            if (!is_string($questionText) || trim($questionText) === '') {
+                return $this->getFallbackQuestions($interview);
+            }
+
+            $formatted[] = [
+                'question_text' => trim($questionText),
+                'type' => in_array($question['type'] ?? '', ['technical', 'behavioral', 'situational', 'general'])
+                    ? $question['type']
+                    : 'general',
+                'expected_skills' => $question['expected_skills'] ?? [],
+                'evaluation_criteria' => $question['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
+                'order' => $index + 1,
+            ];
+        }
+
+        return $formatted;
     }
-
-    $formatted = [];
-    foreach ($data['questions'] as $index => $question) {
-        // 🔹 Build the question_text as an array with both languages
-        $questionText = [
-            'en' => $question['question_text'] ?? 'Please describe your experience with relevant technologies.',
-            'ar' => $question['question_text'] ?? 'يرجى وصف خبرتك مع التقنيات ذات الصلة.',
-        ];
-
-        $formatted[] = [
-            'question_text' => $questionText,  // 🔹 Pass array directly - Eloquent will cast to JSON
-            'type' => in_array($question['type'] ?? '', ['technical', 'behavioral', 'situational', 'general'])
-                ? $question['type']
-                : 'general',
-            'expected_skills' => $question['expected_skills'] ?? [],
-            'evaluation_criteria' => $question['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
-            'order' => $index + 1,
-        ];
-    }
-
-    return $formatted;
-}
 
     /**
      * Validate and enrich AI-generated report
@@ -927,34 +1362,40 @@ private function validateAndFormatQuestions(array $data, int $expectedCount): ar
     /**
      * Fallback questions if AI fails
      */
-private function getFallbackQuestions(Interview $interview): array
-{
-    $questions = [];
-    $skill = $interview->skills[0] ?? 'software development';
+    private function getFallbackQuestions(Interview $interview): array
+    {
+        $questions = [];
+        $locale = $this->normalizeLocale($interview->locale ?? null);
+        $skill = $interview->skills[0] ?? $this->localizedText($locale, 'تطوير البرمجيات', 'software development');
 
-    $templates = [
-        "Tell me about your experience with {$skill}.",
-        "What's the most challenging {$skill} project you've worked on?",
-        "How do you stay updated with the latest developments in {$skill}?",
-        "Describe a time you had to learn a new technology quickly.",
-        "How do you approach problem-solving in {$skill}?"
-    ];
+        $templates = $locale === 'ar'
+            ? [
+                "حدثني عن خبرتك في {$skill}.",
+                "ما أصعب مشروع عملت عليه في {$skill}؟",
+                "كيف تتابع أحدث التطورات في {$skill}؟",
+                "صف موقفًا اضطررت فيه إلى تعلم تقنية جديدة بسرعة.",
+                "كيف تتعامل مع حل المشكلات في {$skill}؟",
+            ]
+            : [
+                "Tell me about your experience with {$skill}.",
+                "What's the most challenging {$skill} project you've worked on?",
+                "How do you stay updated with the latest developments in {$skill}?",
+                "Describe a time you had to learn a new technology quickly.",
+                "How do you approach problem-solving in {$skill}?",
+            ];
 
-    foreach (array_slice($templates, 0, $interview->number_of_questions) as $index => $template) {
-        $questions[] = [
-            'question_text' => [
-                'en' => $template,
-                'ar' => $template,
-            ],
-            'type' => $index < 2 ? 'technical' : 'behavioral',
-            'expected_skills' => [$skill],
-            'evaluation_criteria' => ['clarity', 'depth', 'relevance', 'confidence'],
-            'order' => $index + 1,
-        ];
+        foreach (array_slice($templates, 0, $interview->number_of_questions) as $index => $template) {
+            $questions[] = [
+                'question_text' => $template,
+                'type' => $index < 2 ? 'technical' : 'behavioral',
+                'expected_skills' => [$skill],
+                'evaluation_criteria' => ['clarity', 'depth', 'relevance', 'confidence'],
+                'order' => $index + 1,
+            ];
+        }
+
+        return $questions;
     }
-
-    return $questions;
-}
 
     /**
      * Fallback report generation
@@ -985,5 +1426,30 @@ private function getFallbackQuestions(Interview $interview): array
             'hiring_recommendation' => $avgScore >= 7 ? 'Recommend' : 'Consider',
             'ai_raw_response' => ['note' => 'Fallback response generated'],
         ];
+    }
+
+    /**
+     * Normalize supported application locales.
+     */
+    private function normalizeLocale(?string $locale): string
+    {
+        $locale = strtolower((string) ($locale ?: app()->getLocale()));
+        return str_starts_with($locale, 'ar') ? 'ar' : 'en';
+    }
+
+    /**
+     * Human-readable language name used in OpenAI prompts.
+     */
+    private function languageName(string $locale): string
+    {
+        return $locale === 'ar' ? 'Arabic' : 'English';
+    }
+
+    /**
+     * Select a fallback message using the interview locale.
+     */
+    private function localizedText(string $locale, string $arabic, string $english): string
+    {
+        return $locale === 'ar' ? $arabic : $english;
     }
 }

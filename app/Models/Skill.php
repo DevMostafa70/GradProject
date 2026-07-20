@@ -4,11 +4,11 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use App\Models\Concerns\HasTranslations;
 
 class Skill extends Model
 {
-    use HasFactory;
-
+    use HasFactory, HasTranslations;
     protected $fillable = [
         'name',
         'category',
@@ -19,6 +19,8 @@ class Skill extends Model
     protected $casts = [
         'is_active' => 'boolean',
         'usage_count' => 'integer',
+        'name' => 'array',
+        'category' => 'array',
     ];
 
     public function incrementUsage(): void

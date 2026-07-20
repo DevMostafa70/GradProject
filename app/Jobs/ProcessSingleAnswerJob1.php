@@ -53,9 +53,6 @@ class ProcessSingleAnswerJob implements ShouldQueue
     ): void {
         try {
             $this->answer->refresh();
-            $interview = $this->answer->interview()->firstOrFail();
-            $locale = $interview->normalizedLocale();
-            app()->setLocale($locale);
 
             // Queue retries are idempotent. If the answer was already fully
             // evaluated, only re-run the final-report readiness check.
@@ -91,18 +88,22 @@ class ProcessSingleAnswerJob implements ShouldQueue
                 'answer_id' => $this->answer->id
             ]);
 
-            $transcriptionResult = $transcriptionService->transcribe($this->audioFilePath, $locale);
+            $transcriptionResult = $transcriptionService->transcribe($this->audioFilePath);
 
             if (!$transcriptionResult['success']) {
                 Log::error('Transcription failed for answer', [
                     'answer_id' => $this->answer->id,
-                    'locale' => $locale,
-                    'error' => $transcriptionResult['error'] ?? 'Unknown error',
+                    'error' => $transcriptionResult['error'] ?? 'Unknown error'
                 ]);
 
-                throw new \RuntimeException(
-                    $transcriptionResult['error'] ?? 'Audio transcription failed.'
-                );
+                // Still mark as failed but don't throw, let the job continue with fallback
+                $this->answer->update([
+                    'transcription' => 'Transcription failed',
+                    'processing_metadata' => [
+                        'transcription_error' => $transcriptionResult['error'] ?? 'Unknown error',
+                        'failed_at' => now()->toISOString(),
+                    ]
+                ]);
             } else {
                 // Step 2: Update answer with real transcription
                 $this->answer->update([
@@ -110,8 +111,6 @@ class ProcessSingleAnswerJob implements ShouldQueue
                     'processing_metadata' => [
                         'transcription_confidence' => $transcriptionResult['confidence'],
                         'transcription_model' => $transcriptionResult['model_used'] ?? 'whisper-1',
-                        'transcription_language' => $transcriptionResult['language'] ?? $locale,
-                        'interview_locale' => $locale,
                         'word_count' => $transcriptionResult['word_count'],
                         'transcribed_at' => now()->toISOString(),
                     ]
@@ -222,9 +221,6 @@ class ProcessSingleAnswerJob implements ShouldQueue
                 [
                     'question_id' => $this->answer->question_id,
                     'interview_id' => $this->answer->interview_id,
-                    // Keep score as the pure content score. The integrity
-                    // deduction is stored in criteria_scores and applied once
-                    // when the final interview report is generated.
                     'score' => $evaluation['score'],
                     'criteria_scores' => $evaluation['criteria_scores'],
                     'strengths' => $evaluation['strengths'],
@@ -338,40 +334,35 @@ class ProcessSingleAnswerJob implements ShouldQueue
         $question = $this->answer->question;
         $interview = $question->interview;
 
-        // Only violations related to the current question are applied here.
-        // Interview-level penalties are calculated again only for the final
-        // report, so the model itself must not apply any cheating deduction.
+        $cheatingContext = '';
+        $cheatingPenalty = 0;
+
         $violations = $interview->antiCheatLogs()
-            ->where(function ($query) use ($question) {
-                $query->where('question_id', $question->id)
-                    ->orWhere('metadata->question_id', $question->id);
-            })
             ->where('violation_timestamp', '<=', $this->answer->submitted_at)
             ->get();
 
-        $cheatingPenalty = 0.0;
+        if ($violations->isNotEmpty()) {
+            $cheatingContext = "\n\nCheating violations detected:\n";
 
-        foreach ($violations as $violation) {
-            $weight = (float) ($violation->severity_weight ?: 1.0);
-            $confidence = max(0.0, min(1.0, (float) $violation->confidence_score));
-            $duration = max(0.0, min(300.0, (float) $violation->duration_seconds));
-            $durationMultiplier = 1.0 + min(1.0, $duration / 60.0);
+            foreach ($violations as $violation) {
+                $cheatingContext .= "- {$violation->violation_type} (confidence: {$violation->confidence_score})\n";
 
-            // Convert anti-cheat severity to the answer's 0-10 scale.
-            $cheatingPenalty += $weight * $confidence * $durationMultiplier * 0.1;
+                $cheatingPenalty +=
+                    $violation->severity_weight *
+                    $violation->confidence_score *
+                    0.1;
+            }
+
+            $cheatingContext .= "\nApply a penalty of {$cheatingPenalty} points.";
         }
 
-        $cheatingPenalty = round(min(4.0, $cheatingPenalty), 2);
-        $transcript = $safeTranscript ?: ($this->answer->transcription ?? '');
-        $locale = $interview->normalizedLocale();
-        $language = $locale === 'ar' ? 'Arabic' : 'English';
-        $questionText = $question->textForLocale($locale);
+        // 🔹 Use safe transcript instead of raw transcript
+        $transcript = $safeTranscript ?? $this->answer->transcription ?? '';
 
         $prompt = <<<EOT
 Evaluate this interview answer for a {$interview->experience_level} {$interview->position} position.
-The interview language is {$language}.
 
-Question: {$questionText}
+Question: {$question->question_text}
 Question Type: {$question->type}
 
 Candidate's Answer:
@@ -382,6 +373,7 @@ Audio Metrics:
 - Filler Words: {$audioAnalysis['filler_word_count']}
 - Voice Stability: {$audioAnalysis['voice_stability']}
 - Confidence Level: {$audioAnalysis['confidence_level']}
+{$cheatingContext}
 
 You MUST respond with ONLY a valid JSON object. No markdown. No explanation.
 
@@ -402,9 +394,7 @@ Rules:
 - clarity_score, relevance_score, depth_score, confidence_score must be between 0 and 1
 - Evaluate the actual transcribed answer content
 - Consider audio quality metrics
-- Write strengths, weaknesses, and detailed_feedback in {$language}.
-- Keep the JSON property names exactly as specified in English.
-- Do not translate technical terms unnecessarily.
+- Apply cheating penalties if violations were detected
 EOT;
 
         $maxRetries = 3;
@@ -421,7 +411,7 @@ EOT;
                     'messages' => [
                         [
                             'role' => 'system',
-                            'content' => "You are an expert technical interviewer. The interview language is {$language}. Respond ONLY with valid JSON and write all user-facing feedback in {$language}.",
+                            'content' => 'You are an expert technical interviewer. Respond ONLY with valid JSON.',
                         ],
                         [
                             'role' => 'user',
@@ -448,29 +438,20 @@ EOT;
                     throw new \Exception('Invalid evaluation JSON response');
                 }
 
-                $contentScore = max(0, min(10, (float) ($evaluation['score'] ?? 7.0)));
-                $adjustedScore = max(0, min(10, $contentScore - $cheatingPenalty));
+                $finalScore = ($evaluation['score'] ?? 7.0) - $cheatingPenalty;
+                $finalScore = max(0, min(10, $finalScore));
 
                 return [
-                    // score remains the pure content score. The final report
-                    // applies the interview-level integrity penalty once.
-                    'score' => $contentScore,
-                    'content_score' => $contentScore,
-                    'adjusted_score' => $adjustedScore,
-                    'cheating_penalty' => $cheatingPenalty,
+                    'score' => $finalScore,
                     'criteria_scores' => [
-                        'content_score' => $contentScore,
-                        'adjusted_score' => $adjustedScore,
-                        'cheating_penalty' => $cheatingPenalty,
-                        'violations_count' => $violations->count(),
                         'clarity' => $evaluation['clarity_score'] ?? 0.7,
                         'depth' => $evaluation['depth_score'] ?? 0.7,
                         'relevance' => $evaluation['relevance_score'] ?? 0.7,
                         'confidence' => $evaluation['confidence_score'] ?? 0.7,
                     ],
-                    'strengths' => $evaluation['strengths'] ?? ($locale === 'ar' ? 'إجابة جيدة.' : 'Good response.'),
-                    'weaknesses' => $evaluation['weaknesses'] ?? ($locale === 'ar' ? 'يمكن إضافة مزيد من التفاصيل.' : 'Could be more detailed.'),
-                    'detailed_feedback' => $evaluation['detailed_feedback'] ?? ($locale === 'ar' ? 'الإجابة مقبولة وتحتاج إلى مزيد من التفصيل.' : 'The answer is acceptable and could be more detailed.'),
+                    'strengths' => $evaluation['strengths'] ?? 'Good response.',
+                    'weaknesses' => $evaluation['weaknesses'] ?? 'Could be more detailed.',
+                    'detailed_feedback' => $evaluation['detailed_feedback'] ?? 'Acceptable answer.',
                     'clarity_score' => $evaluation['clarity_score'] ?? 0.7,
                     'relevance_score' => $evaluation['relevance_score'] ?? 0.7,
                     'depth_score' => $evaluation['depth_score'] ?? 0.7,
@@ -496,39 +477,26 @@ EOT;
             'answer_id' => $this->answer->id,
         ]);
 
-        $wordCount = $this->countWords($transcript);
+        $wordCount = str_word_count($transcript);
         $baseScore = $wordCount > 100 ? 8.0 : ($wordCount > 50 ? 7.0 : 6.0);
 
-        $adjustedScore = max(0, min(10, $baseScore - $cheatingPenalty));
-
         return [
-            'score' => $baseScore,
-            'content_score' => $baseScore,
-            'adjusted_score' => $adjustedScore,
-            'cheating_penalty' => $cheatingPenalty,
+            'score' => max(0, $baseScore - $cheatingPenalty),
             'criteria_scores' => [
-                'content_score' => $baseScore,
-                'adjusted_score' => $adjustedScore,
-                'cheating_penalty' => $cheatingPenalty,
-                'violations_count' => $violations->count(),
                 'clarity' => 0.7,
                 'depth' => 0.7,
                 'relevance' => 0.7,
                 'confidence' => 0.7,
             ],
-            'strengths' => $locale === 'ar' ? 'أظهرت الإجابة فهماً للموضوع.' : 'The answer demonstrated an understanding of the topic.',
-            'weaknesses' => $locale === 'ar' ? 'يمكن تقديم أمثلة أكثر تحديداً.' : 'The answer could include more specific examples.',
-            'detailed_feedback' => $locale === 'ar'
-                ? "تضمنت الإجابة {$wordCount} كلمة وتناولت السؤال."
-                : "The answer contained {$wordCount} words and addressed the question.",
+            'strengths' => 'Demonstrated understanding of the topic.',
+            'weaknesses' => 'Could provide more specific examples.',
+            'detailed_feedback' => "The answer contained {$wordCount} words and addressed the question.",
             'clarity_score' => 0.7,
             'relevance_score' => 0.7,
             'depth_score' => 0.7,
             'confidence_score' => 0.7,
             'raw_response' => [
-                'note' => $locale === 'ar'
-                    ? 'تم استخدام تقييم احتياطي بعد فشل ثلاث محاولات.'
-                    : 'Fallback evaluation used after three failed attempts.',
+                'note' => 'Fallback evaluation used after 3 failed attempts',
             ],
         ];
     }
@@ -600,12 +568,5 @@ EOT;
         }
     }
 
-
-    private function countWords(string $text): int
-    {
-        preg_match_all('/[\p{L}\p{N}]+/u', $text, $matches);
-
-        return count($matches[0] ?? []);
-    }
 
 }
