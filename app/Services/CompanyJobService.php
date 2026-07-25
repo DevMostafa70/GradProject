@@ -27,32 +27,65 @@ class CompanyJobService
      */
     public function createJob(Company $company, array $data): CompanyJob
     {
-        try {
-            Log::info('CompanyJobService: Creating job for company ID: ' . $company->id);
+        return DB::transaction(function () use ($company, $data): CompanyJob {
+            Log::info('CompanyJobService: creating company interview job.', [
+                'company_id' => $company->id,
+                'questions_source' => $data['questions_source'] ?? 'mixed',
+                'interview_locale' => $data['interview_locale'] ?? 'en',
+            ]);
 
-            $job = CompanyJob::create([
+            $numberOfQuestions = (int) $data['number_of_questions'];
+            $source = $data['questions_source'] ?? 'mixed';
+
+            $aiQuestionsCount = match ($source) {
+                'ai_only' => $numberOfQuestions,
+                'company_only' => 0,
+                default => (int) ($data['ai_questions_count'] ?? 0),
+            };
+
+            $companyQuestionsCount = match ($source) {
+                'company_only' => $numberOfQuestions,
+                'ai_only' => 0,
+                default => (int) ($data['company_questions_count'] ?? 0),
+            };
+
+            $job = CompanyJob::query()->create([
                 'company_id' => $company->id,
                 'title' => $data['title'],
                 'description' => $data['description'],
-                'required_skills' => $data['required_skills'],
+                'required_skills' => array_values($data['required_skills']),
                 'custom_questions' => $data['custom_questions'] ?? null,
-                'questions_source' => $data['questions_source'] ?? 'mixed',
-                'number_of_questions' => $data['number_of_questions'],
+                'questions_source' => $source,
+                'number_of_questions' => $numberOfQuestions,
+                'ai_questions_count' => $aiQuestionsCount,
+                'company_questions_count' => $companyQuestionsCount,
                 'difficulty' => $data['difficulty'],
+                'difficulty_distribution' => $data['difficulty_distribution'] ?? null,
+                'question_order' => 'random',
+                'interview_locale' => $data['interview_locale'] ?? 'en',
+                'interview_instructions' => $data['interview_instructions'] ?? null,
+                'invitation_valid_hours' => (int) ($data['invitation_valid_hours'] ?? 72),
+                'max_resume_count' => 3,
+                'interview_duration_minutes' => (int) ($data['interview_duration_minutes'] ?? 120),
+                'random_snapshot_count' => (int) ($data['random_snapshot_count'] ?? 3),
+                'liveness_challenge_count' => 0,
+                'identity_verification_required' => true,
+                'identity_document_required' => true,
+                'liveness_required' => false,
+                'delete_identity_evidence_after_review' => true,
                 'max_candidates' => $data['max_candidates'] ?? null,
                 'expires_at' => $data['expires_at'] ?? null,
-                'hide_score_from_candidate' => $data['hide_score_from_candidate'] ?? true,
+                'hide_score_from_candidate' => true,
                 'status' => 'active',
             ]);
 
-            Log::info('CompanyJobService: Job created with ID: ' . $job->id);
+            Log::info('CompanyJobService: company interview job created.', [
+                'company_id' => $company->id,
+                'job_id' => $job->id,
+            ]);
 
-            return $job;
-        } catch (\Exception $e) {
-            Log::error('CompanyJobService: Error creating job: ' . $e->getMessage());
-            Log::error('CompanyJobService: Data received: ' . json_encode($data));
-            throw $e;
-        }
+            return $job->fresh();
+        });
     }
 
     /**

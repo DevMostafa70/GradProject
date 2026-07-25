@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Enums\BillingStatus;
+use App\Services\CompanyEmployeeAccessService;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -64,6 +65,12 @@ class Company extends Authenticatable
         'trial_ends_at' => 'datetime',
         'selected_plan_id' => 'integer',
     ];
+
+
+    public function isCompanyOwner(): bool
+    {
+        return true;
+    }
 
     // ==================== العلاقات ====================
 
@@ -236,6 +243,19 @@ class Company extends Authenticatable
     }
 
     /**
+     * Recalculate the stored count from the actual employee records.
+     * The owner is included in plan limits, hence the +1.
+     */
+    public function syncEmployeeCount(): int
+    {
+        $count = 1 + $this->employees()->count();
+        $this->forceFill(['current_employees' => $count])->saveQuietly();
+        $this->current_employees = $count;
+
+        return $count;
+    }
+
+    /**
      * Get employee limit information as array
      */
     public function getEmployeeLimitInfo(): array
@@ -269,8 +289,8 @@ class Company extends Authenticatable
                 'name' => $employee->name,
                 'email' => $employee->email,
                 'is_active' => $employee->is_active,
-                'roles' => $employee->getRoleNames(),
-                'permissions' => $employee->getAllPermissions()->pluck('name'),
+                'roles' => app(CompanyEmployeeAccessService::class)->roleNames($employee),
+                'permissions' => app(CompanyEmployeeAccessService::class)->permissionNames($employee),
                 'created_at' => $employee->created_at,
             ];
         });
@@ -285,19 +305,25 @@ class Company extends Authenticatable
      */
     public function assignEmployeePermissions(User $employee, CompanyPermissionTemplate $template): void
     {
-        if ($employee->company_id !== $this->id) {
-            throw new \Exception('Employee does not belong to this company');
+        if ((int) $employee->company_id !== (int) $this->id) {
+            throw new \InvalidArgumentException('Employee does not belong to this company');
         }
 
-        $employee->syncPermissions($template->permissions);
-
-        // Update employee count if needed
-        if (!$employee->is_company_employee) {
-            $employee->update([
-                'is_company_employee' => true,
-            ]);
-            $this->incrementEmployeeCount();
+        if ((int) $template->company_id !== (int) $this->id) {
+            throw new \InvalidArgumentException('Permission template does not belong to this company');
         }
+
+        $employee->update([
+            'is_company_employee' => true,
+            'company_permission_template_id' => $template->id,
+        ]);
+
+        $accessService = app(CompanyEmployeeAccessService::class);
+        if ($accessService->roleNames($employee) === []) {
+            $accessService->syncRole($employee, 'company_employee');
+        }
+        $accessService->syncPermissions($employee, (array) $template->permissions);
+        $this->syncEmployeeCount();
     }
 
     /**
@@ -305,21 +331,20 @@ class Company extends Authenticatable
      */
     public function removeEmployee(User $employee): void
     {
-        if ($employee->company_id !== $this->id) {
-            throw new \Exception('Employee does not belong to this company');
+        if ((int) $employee->company_id !== (int) $this->id) {
+            throw new \InvalidArgumentException('Employee does not belong to this company');
         }
 
-        // Remove all permissions and roles
-        $employee->syncPermissions([]);
-        $employee->syncRoles([]);
-
-        // Remove company association
+        $employee->tokens()->delete();
+        app(CompanyEmployeeAccessService::class)->clear($employee);
         $employee->update([
             'company_id' => null,
+            'company_permission_template_id' => null,
             'is_company_employee' => false,
+            'is_active' => false,
         ]);
 
-        $this->decrementEmployeeCount();
+        $this->syncEmployeeCount();
     }
 
     // ==================== حالة الشركة ====================

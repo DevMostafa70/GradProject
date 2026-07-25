@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Collection;
 
 class CompanyQuestionBank extends Model
 {
@@ -21,6 +22,7 @@ class CompanyQuestionBank extends Model
 
     protected $casts = [
         'questions' => 'array',
+        'total_questions' => 'integer',
     ];
 
     public function job(): BelongsTo
@@ -30,117 +32,269 @@ class CompanyQuestionBank extends Model
 
     public function history(): HasMany
     {
-        return $this->hasMany(CandidateQuestionHistory::class, 'question_bank_id');
+        return $this->hasMany(
+            CandidateQuestionHistory::class,
+            'question_bank_id'
+        );
     }
 
     /**
-     * Get all questions as collection
+     * Return the stored questions while preserving their original indexes.
+     *
+     * Preserving indexes is important because candidate question history stores
+     * the question-bank index and uses it to prevent repeating questions.
      */
-    public function getQuestionsCollection(): \Illuminate\Support\Collection
+    public function getQuestionsCollection(): Collection
     {
-        return collect($this->questions);
+        $questions = is_array($this->questions)
+            ? $this->questions
+            : [];
+
+        return collect($questions)->filter(
+            static fn (mixed $question): bool => is_array($question)
+        );
     }
 
     /**
-     * Get questions by difficulty
+     * Return questions matching a difficulty while preserving original indexes.
      */
-    public function getQuestionsByDifficulty(?string $difficulty = null): \Illuminate\Support\Collection
+    public function getQuestionsByDifficulty(?string $difficulty = null): Collection
     {
         $questions = $this->getQuestionsCollection();
 
-        if ($difficulty) {
-            return $questions->where('difficulty', $difficulty);
+        $difficulty = $this->normalizeDifficulty($difficulty);
+
+        if ($difficulty === null) {
+            return $questions;
         }
 
-        return $questions;
+        return $questions->filter(function (array $question) use ($difficulty): bool {
+            $questionDifficulty = $this->normalizeDifficulty(
+                $question['difficulty'] ?? 'medium'
+            );
+
+            return $questionDifficulty === $difficulty;
+        });
     }
 
     /**
-     * Get random questions
+     * Select random questions without repeating excluded question-bank indexes.
+     *
+     * If fewer questions are available than requested, this method returns only
+     * the available questions. The caller can then use AI fallback questions or
+     * return a clear validation error for company-only interviews.
      */
-    public function getRandomQuestions(int $count, ?array $excludeIds = [], ?array $difficultyDistribution = null): array
-    {
-        $availableQuestions = $this->getQuestionsCollection();
+    public function getRandomQuestions(
+        int $count,
+        ?array $excludeIds = [],
+        ?array $difficultyDistribution = null
+    ): array {
+        $count = max(0, $count);
 
-        // Exclude already used questions
-        if (!empty($excludeIds)) {
-            $availableQuestions = $availableQuestions->reject(function ($q, $index) use ($excludeIds) {
-                return in_array($index, $excludeIds);
-            });
+        if ($count === 0) {
+            return [];
         }
 
-        // If difficulty distribution is specified
-        if ($difficultyDistribution && is_array($difficultyDistribution)) {
-            return $this->getQuestionsByDifficultyDistribution($difficultyDistribution, $excludeIds);
+        $excludedIndexes = $this->normalizeExcludedIndexes($excludeIds ?? []);
+
+        $availableQuestions = $this->getQuestionsCollection()
+            ->reject(
+                static fn (array $question, int|string $index): bool =>
+                    isset($excludedIndexes[(string) $index])
+            );
+
+        if ($availableQuestions->isEmpty()) {
+            return [];
         }
 
-        // Simple random selection
-        if ($availableQuestions->count() >= $count) {
-            return $availableQuestions->random($count)->toArray();
+        if (is_array($difficultyDistribution) && $difficultyDistribution !== []) {
+            return $this->getQuestionsByDifficultyDistribution(
+                $availableQuestions,
+                $difficultyDistribution,
+                $count
+            );
         }
 
-        // Not enough questions, fallback to all available + repeat from beginning
-        $selected = $availableQuestions->toArray();
-        $remaining = $count - count($selected);
-
-        if ($remaining > 0) {
-            $allQuestions = $this->getQuestionsCollection();
-            $additional = $allQuestions->random($remaining)->toArray();
-            $selected = array_merge($selected, $additional);
-        }
-
-        return $selected;
+        return $this->takeRandom($availableQuestions, $count)
+            ->values()
+            ->all();
     }
 
     /**
-     * Get questions based on difficulty distribution
+     * Select questions using a difficulty distribution.
+     *
+     * The configured distribution can describe a larger interview than the
+     * requested company-question count. Therefore, it is converted into
+     * proportional allocations whose total is exactly the requested count.
      */
-    private function getQuestionsByDifficultyDistribution(array $distribution, array $excludeIds = []): array
-    {
-        $selected = [];
-        $usedIndices = $excludeIds;
+    private function getQuestionsByDifficultyDistribution(
+        Collection $availableQuestions,
+        array $distribution,
+        int $requestedCount
+    ): array {
+        $allocations = $this->buildDifficultyAllocations(
+            $distribution,
+            $requestedCount
+        );
 
-        foreach ($distribution as $difficulty => $requiredCount) {
-            $questions = $this->getQuestionsByDifficulty($difficulty);
+        if ($allocations === []) {
+            return $this->takeRandom($availableQuestions, $requestedCount)
+                ->values()
+                ->all();
+        }
 
-            // Filter out used questions
-            $available = $questions->reject(function ($q, $index) use ($usedIndices) {
-                return in_array($index, $usedIndices);
+        $remainingPool = $availableQuestions;
+        $selected = collect();
+
+        foreach ($allocations as $difficulty => $requiredCount) {
+            if ($requiredCount <= 0 || $remainingPool->isEmpty()) {
+                continue;
+            }
+
+            $difficultyPool = $remainingPool->filter(function (array $question) use ($difficulty): bool {
+                $questionDifficulty = $this->normalizeDifficulty(
+                    $question['difficulty'] ?? 'medium'
+                );
+
+                return $questionDifficulty === $difficulty;
             });
 
-            $availableCount = $available->count();
+            $picked = $this->takeRandom($difficultyPool, $requiredCount);
 
-            if ($availableCount >= $requiredCount) {
-                $randomKeys = $available->random($requiredCount)->keys()->toArray();
-                foreach ($randomKeys as $key) {
-                    $selected[] = $questions[$key];
-                    $usedIndices[] = $key;
-                }
-            } else {
-                // Take all available from this difficulty
-                foreach ($available as $index => $question) {
-                    $selected[] = $question;
-                    $usedIndices[] = $index;
-                }
-
-                // Fill remaining from any difficulty
-                $remaining = $requiredCount - $availableCount;
-                if ($remaining > 0) {
-                    $allAvailable = $this->getQuestionsCollection()->reject(function ($q, $index) use ($usedIndices) {
-                        return in_array($index, $usedIndices);
-                    });
-
-                    if ($allAvailable->count() >= $remaining) {
-                        $additional = $allAvailable->random($remaining);
-                        foreach ($additional as $index => $question) {
-                            $selected[] = $question;
-                            $usedIndices[] = $index;
-                        }
-                    }
-                }
+            foreach ($picked as $index => $question) {
+                $selected->push($question);
+                $remainingPool->forget($index);
             }
         }
 
-        return $selected;
+        /*
+         * If one difficulty did not contain enough questions, fill the missing
+         * positions from the remaining questions of any difficulty.
+         */
+        $missingCount = $requestedCount - $selected->count();
+
+        if ($missingCount > 0 && $remainingPool->isNotEmpty()) {
+            $additional = $this->takeRandom($remainingPool, $missingCount);
+
+            foreach ($additional as $question) {
+                $selected->push($question);
+            }
+        }
+
+        return $selected
+            ->take($requestedCount)
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Convert difficulty weights/counts into allocations that add up to the
+     * exact number of requested questions.
+     */
+    private function buildDifficultyAllocations(
+        array $distribution,
+        int $requestedCount
+    ): array {
+        $requestedCount = max(0, $requestedCount);
+
+        if ($requestedCount === 0) {
+            return [];
+        }
+
+        $weights = [];
+
+        foreach ($distribution as $difficulty => $weight) {
+            $normalizedDifficulty = $this->normalizeDifficulty(
+                is_string($difficulty) ? $difficulty : null
+            );
+
+            $numericWeight = is_numeric($weight)
+                ? max(0.0, (float) $weight)
+                : 0.0;
+
+            if ($normalizedDifficulty !== null && $numericWeight > 0) {
+                $weights[$normalizedDifficulty] =
+                    ($weights[$normalizedDifficulty] ?? 0.0) + $numericWeight;
+            }
+        }
+
+        $totalWeight = array_sum($weights);
+
+        if ($totalWeight <= 0) {
+            return [];
+        }
+
+        $allocations = [];
+        $fractions = [];
+        $allocatedCount = 0;
+
+        foreach ($weights as $difficulty => $weight) {
+            $exactAllocation = ($weight / $totalWeight) * $requestedCount;
+            $baseAllocation = (int) floor($exactAllocation);
+
+            $allocations[$difficulty] = $baseAllocation;
+            $fractions[$difficulty] = $exactAllocation - $baseAllocation;
+            $allocatedCount += $baseAllocation;
+        }
+
+        $remainingCount = $requestedCount - $allocatedCount;
+
+        if ($remainingCount > 0) {
+            arsort($fractions, SORT_NUMERIC);
+
+            foreach (array_keys($fractions) as $difficulty) {
+                if ($remainingCount <= 0) {
+                    break;
+                }
+
+                $allocations[$difficulty]++;
+                $remainingCount--;
+            }
+        }
+
+        return $allocations;
+    }
+
+    /**
+     * Return up to $count random items while preserving original collection keys.
+     */
+    private function takeRandom(Collection $questions, int $count): Collection
+    {
+        $takeCount = min(max(0, $count), $questions->count());
+
+        if ($takeCount === 0) {
+            return collect();
+        }
+
+        return $questions->random($takeCount);
+    }
+
+    /**
+     * Create a lookup table for excluded question-bank indexes.
+     */
+    private function normalizeExcludedIndexes(array $excludeIds): array
+    {
+        $lookup = [];
+
+        foreach ($excludeIds as $index) {
+            if (is_int($index) || is_string($index)) {
+                $lookup[(string) $index] = true;
+            }
+        }
+
+        return $lookup;
+    }
+
+    private function normalizeDifficulty(?string $difficulty): ?string
+    {
+        if ($difficulty === null) {
+            return null;
+        }
+
+        $difficulty = strtolower(trim($difficulty));
+
+        return in_array($difficulty, ['easy', 'medium', 'hard'], true)
+            ? $difficulty
+            : null;
     }
 }

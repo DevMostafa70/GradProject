@@ -7,7 +7,7 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 use Spatie\Permission\Traits\HasRoles;
-use Spatie\Permission\Models\Permission;
+use App\Services\CompanyEmployeeAccessService;
 
 class User extends Authenticatable
 {
@@ -27,6 +27,7 @@ class User extends Authenticatable
         'is_verified',
         'verified_at',
         'company_id',
+        'company_permission_template_id',
         'is_company_employee',
         'locale',
     ];
@@ -43,33 +44,18 @@ class User extends Authenticatable
         'is_verified' => 'boolean',
         'is_company_employee' => 'boolean',
         'company_id' => 'integer',
+        'company_permission_template_id' => 'integer',
     ];
 
-    public function getGuardName(): string
+    /**
+     * All records in the users table use the user guard.
+     * Company employees are still User models; only company owners use
+     * the separate company guard through the Company model.
+     */
+    protected static function booted(): void
     {
-        if ($this->isCompanyEmployee()) {
-            return 'company';
-        }
-        return 'user';
-    }
-
-    public function setGuardName(): void
-    {
-        $this->guard_name = $this->getGuardName();
-    }
-
-    protected static function booted()
-    {
-        static::retrieved(function ($user) {
-            $user->setGuardName();
-        });
-
-        static::saved(function ($user) {
-            $user->setGuardName();
-        });
-
-        static::created(function ($user) {
-            if ($user->role === 'user' && !$user->isCompanyEmployee()) {
+        static::created(function (User $user): void {
+            if ($user->isRegularUser()) {
                 $user->assignRole('regular_user');
             }
         });
@@ -112,6 +98,11 @@ class User extends Authenticatable
         return $this->belongsTo(Company::class, 'company_id');
     }
 
+    public function companyPermissionTemplate()
+    {
+        return $this->belongsTo(CompanyPermissionTemplate::class, 'company_permission_template_id');
+    }
+
     public function isRegularUser(): bool
     {
         return $this->role === 'user' && !$this->isCompanyEmployee();
@@ -149,21 +140,18 @@ class User extends Authenticatable
 
     public function isCompanyOwner(): bool
     {
-        return $this->role === 'company' && $this->company_id !== null;
+        // Company owners authenticate through App\Models\Company.
+        // A users-table record must never receive owner bypass privileges.
+        return false;
     }
 
     public function getCompanyRole(): ?string
     {
-        if (!$this->company_id) {
+        if (! $this->isCompanyEmployee()) {
             return null;
         }
 
-        try {
-            $roles = $this->getRoleNames();
-            return $roles->first() ?? null;
-        } catch (\Exception $e) {
-            return null;
-        }
+        return app(CompanyEmployeeAccessService::class)->roleNames($this)[0] ?? null;
     }
 
     public function getCompanyPermissions(): array
@@ -172,22 +160,12 @@ class User extends Authenticatable
             return [];
         }
 
-        try {
-            return $this->getAllPermissions()->pluck('name')->toArray();
-        } catch (\Exception $e) {
-            return [];
-        }
+        return app(CompanyEmployeeAccessService::class)->permissionNames($this);
     }
 
     public function syncCompanyPermissions(array $permissionNames): void
     {
-        $permissions = Permission::whereIn('name', $permissionNames)
-            ->where('guard_name', 'user')
-            ->get();
-
-        if ($permissions->isNotEmpty()) {
-            $this->syncPermissions($permissions);
-        }
+        app(CompanyEmployeeAccessService::class)->syncPermissions($this, $permissionNames);
     }
 
     public function hasCompanyPermission(string $permission): bool

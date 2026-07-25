@@ -342,6 +342,47 @@ class GenerateFinalReportJob implements ShouldQueue, ShouldBeUnique
                 'report_generation_completed_at' => now(),
             ])->save();
 
+            if (($interview->interview_type ?? null) === 'company_candidate') {
+                $scoreOutOfHundred = round(
+                    max(0, min(10, (float) ($finalReport->adjusted_score ?? $finalReport->overall_score))) * 10,
+                    2
+                );
+
+                if ($interview->candidate_id) {
+                    \App\Models\Candidate::query()
+                        ->whereKey($interview->candidate_id)
+                        ->update([
+                            'status' => 'completed',
+                            'final_score' => $scoreOutOfHundred,
+                            'completed_at' => now(),
+                            'updated_at' => now(),
+                        ]);
+                }
+
+                if ($interview->company_job_candidate_id) {
+                    \App\Models\CompanyJobCandidate::query()
+                        ->whereKey($interview->company_job_candidate_id)
+                        ->update([
+                            'status' => \App\Models\CompanyJobCandidate::STATUS_COMPLETED,
+                            'final_score' => $scoreOutOfHundred,
+                            'completed_at' => now(),
+                            'updated_at' => now(),
+                        ]);
+                }
+
+                if ($interview->email_invitation_id) {
+                    \App\Models\EmailInvitation::query()
+                        ->whereKey($interview->email_invitation_id)
+                        ->update([
+                            'lifecycle_status' => \App\Models\EmailInvitation::LIFECYCLE_COMPLETED,
+                            'completed_at' => now(),
+                            'token_hash' => null,
+                            'token_ciphertext' => null,
+                            'updated_at' => now(),
+                        ]);
+                }
+            }
+
             return $finalReport->fresh();
         }, 3);
     }

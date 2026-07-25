@@ -1,34 +1,23 @@
 <?php
-// app/Http/Requests/Company/CompanyPermissionTemplateRequest.php
 
 namespace App\Http\Requests\Company;
 
+use App\Models\Company;
+use App\Support\CompanyEmployeePermissionCatalog;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
-class CompanyPermissionTemplateRequest extends FormRequest
+final class CompanyPermissionTemplateRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        $user = $this->user();
-
-        if (!$user) {
-            return false;
-        }
-
-        // ✅ التحقق من أن المستخدم هو Company Owner
-        // Company Owner هو من لديه دور 'company_owner'
-        try {
-            return $user->hasRole('company_owner');
-        } catch (\Exception $e) {
-            // Fallback: التحقق من أن لديه صلاحيات الشركة
-            return $user->hasPermissionTo('company.employees.create');
-        }
+        return $this->user() instanceof Company;
     }
 
     public function rules(): array
     {
-        $templateId = $this->route('template')?->id;
+        $companyId = $this->user()?->getKey() ?? 0;
+        $templateId = $this->route('template')?->getKey();
 
         return [
             'name' => [
@@ -36,13 +25,20 @@ class CompanyPermissionTemplateRequest extends FormRequest
                 'string',
                 'max:255',
                 Rule::unique('company_permission_templates', 'name')
-                    ->where('company_id', $this->user()?->id ?? 0)
+                    ->where(fn ($query) => $query
+                        ->where('company_id', $companyId)
+                        ->whereNull('deleted_at'))
                     ->ignore($templateId),
             ],
-            'description' => 'nullable|string|max:1000',
-            'permissions' => 'required|array|min:1',
-            'permissions.*' => 'string|exists:permissions,name',
-            'is_active' => 'nullable|boolean',
+            'description' => ['nullable', 'string', 'max:1000'],
+            'permissions' => ['required', 'array', 'min:1'],
+            'permissions.*' => [
+                'string',
+                Rule::in(CompanyEmployeePermissionCatalog::ASSIGNABLE),
+                Rule::exists('permissions', 'name')
+                    ->where(fn ($query) => $query->where('guard_name', 'user')),
+            ],
+            'is_active' => ['nullable', 'boolean'],
         ];
     }
 
@@ -53,7 +49,8 @@ class CompanyPermissionTemplateRequest extends FormRequest
             'name.unique' => 'هذا الاسم مستخدم بالفعل في شركتك',
             'permissions.required' => 'يجب تحديد صلاحية واحدة على الأقل',
             'permissions.min' => 'يجب تحديد صلاحية واحدة على الأقل',
-            'permissions.*.exists' => 'الصلاحية المحددة غير موجودة',
+            'permissions.*.in' => 'تتضمن القائمة صلاحية خاصة بمالك الشركة أو غير قابلة للإسناد',
+            'permissions.*.exists' => 'الصلاحية المحددة غير موجودة ضمن guard المستخدم',
         ];
     }
 }

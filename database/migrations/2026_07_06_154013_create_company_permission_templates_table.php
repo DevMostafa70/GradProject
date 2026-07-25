@@ -22,7 +22,7 @@ return new class extends Migration
 
             $table->foreignId('created_by')
                 ->nullable()
-                ->constrained('users')
+                ->constrained('companies')
                 ->nullOnDelete();
 
             $table->softDeletes();

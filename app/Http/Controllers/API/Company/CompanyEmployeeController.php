@@ -5,54 +5,47 @@ namespace App\Http\Controllers\API\Company;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Company\CreateEmployeeRequest;
 use App\Http\Requests\Company\UpdateEmployeeRequest;
-use App\Http\Resources\Company\EmployeeResource;
 use App\Http\Resources\Company\EmployeeLimitResource;
+use App\Http\Resources\Company\EmployeeResource;
 use App\Models\Company;
 use App\Models\CompanyPermissionTemplate;
 use App\Models\User;
+use App\Services\CompanyActivityLogService;
+use App\Services\CompanyEmployeeAccessService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
-use Spatie\Permission\Models\Permission;
-use Spatie\Permission\Models\Role;
+use Illuminate\Support\Facades\Schema;
+use InvalidArgumentException;
+use Throwable;
 
-class CompanyEmployeeController extends Controller
+final class CompanyEmployeeController extends Controller
 {
-    protected Company $company;
-
-    // public function __construct()
-    // {
-    //     $this->middleware(function ($request, $next) {
-    //         $this->company = $request->user();
-    //         return $next($request);
-    //     });
-    // }
-
-    /**
-     * Get all employees for the company
-     * GET /api/company/employees
-     */
     public function index(Request $request): JsonResponse
     {
         /** @var Company $company */
         $company = $request->user();
 
         $employees = $company->employees()
-            ->with('roles', 'permissions')
-            ->when($request->search, function ($query, $search) {
-                return $query->where('name', 'LIKE', "%{$search}%")
-                    ->orWhere('email', 'LIKE', "%{$search}%");
+            ->with(['roles', 'permissions', 'companyPermissionTemplate'])
+            ->when($request->filled('search'), function ($query) use ($request): void {
+                $search = trim((string) $request->input('search'));
+                $query->where(function ($searchQuery) use ($search): void {
+                    $searchQuery->where('name', 'like', "%{$search}%")
+                        ->orWhere('email', 'like', "%{$search}%");
+                });
             })
-            ->orderBy('created_at', 'desc')
-            ->paginate($request->get('per_page', 20));
+            ->latest('id')
+            ->paginate(min(100, max(1, $request->integer('per_page', 20))));
 
         return response()->json([
             'success' => true,
             'data' => EmployeeResource::collection($employees),
             'meta' => [
                 'current_page' => $employees->currentPage(),
+                'last_page' => $employees->lastPage(),
                 'total' => $employees->total(),
                 'per_page' => $employees->perPage(),
                 'limit_info' => $company->getEmployeeLimitInfo(),
@@ -60,19 +53,25 @@ class CompanyEmployeeController extends Controller
         ]);
     }
 
-
-/**
- * Create a new employee
- * POST /api/company/employees
- */
-public function store(CreateEmployeeRequest $request): JsonResponse
-{
-    try {
+    public function store(
+        CreateEmployeeRequest $request,
+        CompanyEmployeeAccessService $accessService,
+        CompanyActivityLogService $activityLog
+    ): JsonResponse {
         /** @var Company $company */
         $company = $request->user();
 
-        if (!$company->canAddEmployee()) {
+        if (! Schema::hasColumn('users', 'company_permission_template_id')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Database schema is missing users.company_permission_template_id. Run the latest migrations, then retry.',
+                'error_code' => 'COMPANY_EMPLOYEE_TEMPLATE_COLUMN_MISSING',
+            ], 503);
+        }
+
+        if (! $company->canAddEmployee()) {
             $limitInfo = $company->getEmployeeLimitInfo();
+
             return response()->json([
                 'success' => false,
                 'message' => "Your plan ({$limitInfo['plan_name']}) allows maximum {$limitInfo['max_employees']} team members. Please upgrade to add more employees.",
@@ -83,307 +82,341 @@ public function store(CreateEmployeeRequest $request): JsonResponse
             ], 403);
         }
 
-        $permissionsToAssign = [];
+        try {
+            [$permissionNames, $template] = $this->resolveRequestedAccess($request, $company);
 
-        if ($request->has('template_id') && $request->template_id) {
-            $template = CompanyPermissionTemplate::where('company_id', $company->id)
-                ->find($request->template_id);
+            $employee = DB::transaction(function () use (
+                $request,
+                $company,
+                $permissionNames,
+                $template,
+                $accessService
+            ): User {
+                $employee = User::create([
+                    'name' => trim((string) $request->input('name')),
+                    'email' => strtolower(trim((string) $request->input('email'))),
+                    'password' => Hash::make((string) $request->input('password')),
+                    'role' => 'user',
+                    'company_id' => $company->id,
+                    'company_permission_template_id' => $template?->id,
+                    'is_company_employee' => true,
+                    'is_active' => true,
+                ]);
 
-            if (!$template) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Template not found for this company',
-                ], 404);
-            }
+                $accessService->syncRole(
+                    $employee,
+                    (string) $request->input('role', 'company_employee')
+                );
+                $accessService->syncPermissions($employee, $permissionNames);
 
-            $permissionsToAssign = $template->permissions;
-        } elseif ($request->has('permissions') && is_array($request->permissions)) {
-            $permissionsToAssign = $request->permissions;
-        }
+                $company->syncEmployeeCount();
 
-        // ✅ Create the user (employee)
-        $employee = User::create([
-            'name' => $request->name,
-            'email' => $request->email,
-            'password' => Hash::make($request->password),
-            'role' => 'user',
-            'company_id' => $company->id,
-            'is_company_employee' => true,
-            'is_active' => true,
-        ]);
+                return $employee;
+            });
 
-        // ✅ تحديث الـ Guard
-        $employee->setGuardName();
-        $employee->refresh();
+            $activityLog->success(
+                $company,
+                'company_employees',
+                'create',
+                "Created company employee '{$employee->name}'",
+                [
+                    'employee_id' => $employee->id,
+                    'employee_email' => $employee->email,
+                    'permission_template_id' => $template?->id,
+                    'permissions' => $permissionNames,
+                ]
+            );
 
-        // ✅ Assign role if provided (guard = company)
-        if ($request->has('role')) {
-            $role = Role::where('name', $request->role)
-                ->where('guard_name', 'company')
-                ->first();
-
-            if ($role) {
-                $employee->assignRole($role);
-            }
-        }
-
-        // ✅ Assign permissions (guard = user) - ✅ استخدم guard = user
-        if (!empty($permissionsToAssign)) {
-            $permissions = Permission::whereIn('name', $permissionsToAssign)
-                ->where('guard_name', 'user')
-                ->get();
-
-            if ($permissions->isNotEmpty()) {
-                $employee->syncPermissions($permissions);
-            }
-        }
-
-        $company->incrementEmployeeCount();
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Employee added successfully',
-            'data' => [
-                'employee' => [
-                    'id' => $employee->id,
-                    'name' => $employee->name,
-                    'email' => $employee->email,
-                    'is_active' => $employee->is_active,
-                    'is_company_employee' => $employee->is_company_employee,
-                    'permissions' => $employee->getAllPermissions()->pluck('name'),
+            return response()->json([
+                'success' => true,
+                'message' => 'Employee added successfully',
+                'data' => [
+                    'employee' => new EmployeeResource(
+                        $employee->fresh()->load(['roles', 'permissions', 'companyPermissionTemplate'])
+                    ),
+                    'limit_info' => $company->fresh()->getEmployeeLimitInfo(),
                 ],
-                'limit_info' => $company->getEmployeeLimitInfo(),
-            ],
-        ], 201);
-
-    } catch (\Exception $e) {
-        Log::error('Failed to create employee: ' . $e->getMessage(), [
-            'trace' => $e->getTraceAsString(),
-        ]);
-
-        return response()->json([
-            'success' => false,
-            'message' => 'Failed to create employee: ' . $e->getMessage(),
-        ], 500);
-    }
-}
-
-/**
- * Show a specific employee
- * GET /api/company/employees/{employee}
- */
-public function show(Request $request, User $employee): JsonResponse
-{
-    /** @var Company $company */
-    $company = $request->user();
-
-    if ($employee->company_id !== $company->id) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Employee not found in your company',
-        ], 404);
-    }
-
-    $employee->load('roles', 'permissions');
-
-    return response()->json([
-        'success' => true,
-        'data' => new EmployeeResource($employee),
-    ]);
-}
-
-/**
- * Update an employee
- * PUT /api/company/employees/{employee}
- */
-public function update(UpdateEmployeeRequest $request, User $employee): JsonResponse
-{
-    try {
-        /** @var Company $company */
-        $company = $request->user();
-
-        if ($employee->company_id !== $company->id) {
+            ], 201);
+        } catch (InvalidArgumentException $exception) {
             return response()->json([
                 'success' => false,
-                'message' => 'Employee not found in your company',
-            ], 404);
+                'message' => $exception->getMessage(),
+                'error_code' => 'INVALID_COMPANY_EMPLOYEE_ACCESS',
+            ], 422);
+        } catch (Throwable $exception) {
+            Log::error('Failed to create company employee.', [
+                'company_id' => $company->id,
+                'error' => $exception->getMessage(),
+                'exception' => $exception::class,
+                'file' => $exception->getFile(),
+                'line' => $exception->getLine(),
+                'trace' => $exception->getTraceAsString(),
+            ]);
+
+            return $this->serverError('Failed to create employee', $exception);
         }
-
-        // ✅ Update basic info
-        $updateData = [];
-
-        if ($request->has('name')) {
-            $updateData['name'] = $request->name;
-        }
-
-        if ($request->has('email')) {
-            $updateData['email'] = $request->email;
-        }
-
-        if ($request->has('password') && $request->password) {
-            $updateData['password'] = Hash::make($request->password);
-        }
-
-        if ($request->has('is_active')) {
-            $updateData['is_active'] = $request->is_active;
-        }
-
-        if (!empty($updateData)) {
-            $employee->update($updateData);
-        }
-
-        // ✅ Update permissions if provided
-        if ($request->has('template_id') && $request->template_id) {
-            $template = CompanyPermissionTemplate::where('company_id', $company->id)
-                ->find($request->template_id);
-
-            if ($template) {
-                $employee->syncPermissions($template->permissions);
-            }
-        } elseif ($request->has('permissions') && is_array($request->permissions)) {
-            $employee->syncPermissions($request->permissions);
-        }
-
-        // ✅ Update role if provided
-        if ($request->has('role')) {
-            $role = Role::where('name', $request->role)
-                ->where('guard_name', 'company')
-                ->first();
-
-            if ($role) {
-                $employee->syncRoles([$role]);
-            }
-        }
-
-        // ✅ Log activity
-        \App\Models\AdminLog::log('update_company_employee', 'company_employee', $employee->id, [
-            'company_id' => $company->id,
-            'company_name' => $company->company_name,
-            'employee_name' => $employee->name,
-            'updated_by' => $company->email,
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Employee updated successfully',
-            'data' => new EmployeeResource($employee->load('roles', 'permissions')),
-        ]);
-
-    } catch (\Exception $e) {
-        Log::error('Failed to update employee: ' . $e->getMessage());
-
-        return response()->json([
-            'success' => false,
-            'message' => 'Failed to update employee: ' . $e->getMessage(),
-        ], 500);
     }
-}
 
-/**
- * Delete an employee
- * DELETE /api/company/employees/{employee}
- */
-public function destroy(Request $request, User $employee): JsonResponse
-{
-    try {
-        /** @var Company $company */
-        $company = $request->user();
-
-        if ($employee->company_id !== $company->id) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Employee not found in your company',
-            ], 404);
-        }
-
-        $employeeName = $employee->name;
-
-        $employee->syncPermissions([]);
-        $employee->syncRoles([]);
-
-        $employee->update([
-            'company_id' => null,
-            'is_company_employee' => false,
-            'is_active' => false,
-        ]);
-
-        $company->decrementEmployeeCount();
-
-        \App\Models\AdminLog::log('delete_company_employee', 'company_employee', $employee->id, [
-            'company_id' => $company->id,
-            'company_name' => $company->company_name,
-            'employee_name' => $employeeName,
-            'deleted_by' => $company->email,
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'message' => "Employee '{$employeeName}' removed successfully",
-            'data' => [
-                'limit_info' => $company->getEmployeeLimitInfo(),
-            ],
-        ]);
-
-    } catch (\Exception $e) {
-        Log::error('Failed to delete employee: ' . $e->getMessage());
-
-        return response()->json([
-            'success' => false,
-            'message' => 'Failed to delete employee: ' . $e->getMessage(),
-        ], 500);
-    }
-}
-
-/**
- * Toggle employee status (activate/deactivate)
- * POST /api/company/employees/{employee}/toggle
- */
-public function toggleStatus(Request $request, User $employee): JsonResponse
-{
-    try {
-        /** @var Company $company */
-        $company = $request->user();
-
-        if ($employee->company_id !== $company->id) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Employee not found in your company',
-            ], 404);
-        }
-
-        $employee->update([
-            'is_active' => !$employee->is_active,
-        ]);
-
-        $status = $employee->is_active ? 'activated' : 'deactivated';
-
-        return response()->json([
-            'success' => true,
-            'message' => "Employee '{$employee->name}' has been {$status}",
-            'data' => [
-                'id' => $employee->id,
-                'is_active' => $employee->is_active,
-            ],
-        ]);
-
-    } catch (\Exception $e) {
-        Log::error('Failed to toggle employee status: ' . $e->getMessage());
-
-        return response()->json([
-            'success' => false,
-            'message' => 'Failed to toggle employee status: ' . $e->getMessage(),
-        ], 500);
-    }
-}
-
-    /**
-     * Get employee limit information
-     * GET /api/company/employee-limits
-     */
-    public function limits(Request $request): JsonResponse  // ✅ أضف $request
+    public function show(Request $request, User $employee): JsonResponse
     {
         /** @var Company $company */
-        $company = $request->user();  // ✅ استخدم $request->user()
+        $company = $request->user();
+
+        if (! $this->belongsToCompany($employee, $company)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Employee not found in your company',
+            ], 404);
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => new EmployeeResource(
+                $employee->load(['roles', 'permissions', 'companyPermissionTemplate'])
+            ),
+        ]);
+    }
+
+    public function update(
+        UpdateEmployeeRequest $request,
+        User $employee,
+        CompanyEmployeeAccessService $accessService,
+        CompanyActivityLogService $activityLog
+    ): JsonResponse {
+        /** @var Company $company */
+        $company = $request->user();
+
+        if (! $this->belongsToCompany($employee, $company)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Employee not found in your company',
+            ], 404);
+        }
+
+        if (! Schema::hasColumn('users', 'company_permission_template_id')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Database schema is missing users.company_permission_template_id. Run the latest migrations, then retry.',
+                'error_code' => 'COMPANY_EMPLOYEE_TEMPLATE_COLUMN_MISSING',
+            ], 503);
+        }
+
+        try {
+            $permissionNames = null;
+            $template = null;
+            $templateId = $employee->company_permission_template_id;
+
+            if ($request->filled('template_id')) {
+                $template = CompanyPermissionTemplate::query()
+                    ->where('company_id', $company->id)
+                    ->where('is_active', true)
+                    ->find($request->integer('template_id'));
+
+                if (! $template) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Template not found or inactive for this company',
+                    ], 404);
+                }
+
+                $permissionNames = (array) $template->permissions;
+                $templateId = $template->id;
+            } elseif ($request->has('permissions')) {
+                $permissionNames = (array) $request->input('permissions', []);
+                $templateId = null;
+            }
+
+            DB::transaction(function () use (
+                $request,
+                $employee,
+                $accessService,
+                $permissionNames,
+                $templateId
+            ): void {
+                $updateData = [];
+
+                if ($request->has('name')) {
+                    $updateData['name'] = trim((string) $request->input('name'));
+                }
+
+                if ($request->has('email')) {
+                    $updateData['email'] = strtolower(trim((string) $request->input('email')));
+                }
+
+                if ($request->filled('password')) {
+                    $updateData['password'] = Hash::make((string) $request->input('password'));
+                }
+
+                if ($request->has('is_active')) {
+                    $updateData['is_active'] = $request->boolean('is_active');
+                }
+
+                if ($permissionNames !== null) {
+                    $updateData['company_permission_template_id'] = $templateId;
+                }
+
+                if ($updateData !== []) {
+                    $employee->update($updateData);
+                }
+
+                if ($permissionNames !== null) {
+                    $accessService->syncPermissions($employee, $permissionNames);
+                }
+
+                if ($request->filled('role')) {
+                    $accessService->syncRole($employee, (string) $request->input('role'));
+                }
+
+                if ($request->has('is_active') && ! $request->boolean('is_active')) {
+                    $employee->tokens()->delete();
+                }
+            });
+
+            $activityLog->success(
+                $company,
+                'company_employees',
+                'update',
+                "Updated company employee '{$employee->name}'",
+                [
+                    'employee_id' => $employee->id,
+                    'permission_template_id' => $templateId,
+                    'permissions_changed' => $permissionNames !== null,
+                ]
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Employee updated successfully',
+                'data' => new EmployeeResource(
+                    $employee->fresh()->load(['roles', 'permissions', 'companyPermissionTemplate'])
+                ),
+            ]);
+        } catch (InvalidArgumentException $exception) {
+            return response()->json([
+                'success' => false,
+                'message' => $exception->getMessage(),
+                'error_code' => 'INVALID_COMPANY_EMPLOYEE_ACCESS',
+            ], 422);
+        } catch (Throwable $exception) {
+            Log::error('Failed to update company employee.', [
+                'employee_id' => $employee->id,
+                'company_id' => $company->id,
+                'error' => $exception->getMessage(),
+                'exception' => $exception::class,
+                'file' => $exception->getFile(),
+                'line' => $exception->getLine(),
+                'trace' => $exception->getTraceAsString(),
+            ]);
+
+            return $this->serverError('Failed to update employee', $exception);
+        }
+    }
+
+    public function destroy(
+        Request $request,
+        User $employee,
+        CompanyEmployeeAccessService $accessService,
+        CompanyActivityLogService $activityLog
+    ): JsonResponse {
+        /** @var Company $company */
+        $company = $request->user();
+
+        if (! $this->belongsToCompany($employee, $company)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Employee not found in your company',
+            ], 404);
+        }
+
+        try {
+            $employeeName = $employee->name;
+
+            DB::transaction(function () use ($employee, $company, $accessService): void {
+                $employee->tokens()->delete();
+                $accessService->clear($employee);
+                $employee->update([
+                    'company_id' => null,
+                    'company_permission_template_id' => null,
+                    'is_company_employee' => false,
+                    'is_active' => false,
+                ]);
+                $company->syncEmployeeCount();
+            });
+
+            $activityLog->success(
+                $company,
+                'company_employees',
+                'delete',
+                "Removed company employee '{$employeeName}'",
+                ['employee_id' => $employee->id]
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => "Employee '{$employeeName}' removed successfully",
+                'data' => [
+                    'limit_info' => $company->fresh()->getEmployeeLimitInfo(),
+                ],
+            ]);
+        } catch (Throwable $exception) {
+            Log::error('Failed to remove company employee.', [
+                'employee_id' => $employee->id,
+                'company_id' => $company->id,
+                'error' => $exception->getMessage(),
+            ]);
+
+            return $this->serverError('Failed to delete employee', $exception);
+        }
+    }
+
+    public function toggleStatus(
+        Request $request,
+        User $employee,
+        CompanyActivityLogService $activityLog
+    ): JsonResponse {
+        /** @var Company $company */
+        $company = $request->user();
+
+        if (! $this->belongsToCompany($employee, $company)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Employee not found in your company',
+            ], 404);
+        }
+
+        try {
+            $employee->update(['is_active' => ! $employee->is_active]);
+
+            if (! $employee->is_active) {
+                $employee->tokens()->delete();
+            }
+
+            $status = $employee->is_active ? 'activated' : 'deactivated';
+            $activityLog->success(
+                $company,
+                'company_employees',
+                'toggle_status',
+                "Employee '{$employee->name}' was {$status}",
+                ['employee_id' => $employee->id, 'is_active' => $employee->is_active]
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => "Employee '{$employee->name}' has been {$status}",
+                'data' => [
+                    'id' => $employee->id,
+                    'is_active' => $employee->is_active,
+                ],
+            ]);
+        } catch (Throwable $exception) {
+            return $this->serverError('Failed to toggle employee status', $exception);
+        }
+    }
+
+    public function limits(Request $request): JsonResponse
+    {
+        /** @var Company $company */
+        $company = $request->user();
 
         return response()->json([
             'success' => true,
@@ -391,18 +424,49 @@ public function toggleStatus(Request $request, User $employee): JsonResponse
         ]);
     }
 
-    // ============================================================
-    // ✅ Helper Methods
-    // ============================================================
+    /** @return array{0: array<int, string>, 1: CompanyPermissionTemplate|null} */
+    private function resolveRequestedAccess(
+        CreateEmployeeRequest $request,
+        Company $company
+    ): array {
+        if ($request->filled('template_id')) {
+            $template = CompanyPermissionTemplate::query()
+                ->where('company_id', $company->id)
+                ->where('is_active', true)
+                ->find($request->integer('template_id'));
 
-    /**
-     * Get upgrade suggestions based on current plan
-     */
+            if (! $template) {
+                throw new InvalidArgumentException('Template not found or inactive for this company.');
+            }
+
+            return [(array) $template->permissions, $template];
+        }
+
+        return [(array) $request->input('permissions', []), null];
+    }
+
+    private function belongsToCompany(User $employee, Company $company): bool
+    {
+        return $employee->isCompanyEmployee()
+            && (int) $employee->company_id === (int) $company->id;
+    }
+
+    private function serverError(string $prefix, Throwable $exception): JsonResponse
+    {
+        return response()->json([
+            'success' => false,
+            'message' => config('app.debug')
+                ? "{$prefix}: {$exception->getMessage()}"
+                : "{$prefix}. Check storage/logs/laravel.log for details.",
+            'error_code' => 'COMPANY_EMPLOYEE_OPERATION_FAILED',
+            'exception' => config('app.debug') ? $exception::class : null,
+            'file' => config('app.debug') ? $exception->getFile() : null,
+            'line' => config('app.debug') ? $exception->getLine() : null,
+        ], 500);
+    }
+
     private function getUpgradeSuggestions(Company $company): array
     {
-        $suggestions = [];
-        $currentPlanSlug = $company->selectedPlan?->slug;
-
         $upgradePlans = [
             'starter' => [
                 'slug' => 'growth',
@@ -424,10 +488,8 @@ public function toggleStatus(Request $request, User $employee): JsonResponse
             ],
         ];
 
-        if ($currentPlanSlug && isset($upgradePlans[$currentPlanSlug])) {
-            $suggestions[] = $upgradePlans[$currentPlanSlug];
-        }
+        $slug = $company->selectedPlan?->slug;
 
-        return $suggestions;
+        return $slug && isset($upgradePlans[$slug]) ? [$upgradePlans[$slug]] : [];
     }
 }

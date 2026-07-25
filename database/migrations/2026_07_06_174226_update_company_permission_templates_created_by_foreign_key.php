@@ -1,42 +1,60 @@
 <?php
-// database/migrations/2026_07_06_000005_update_company_permission_templates_created_by_foreign_key.php
 
 use Illuminate\Database\Migrations\Migration;
-use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
     public function up(): void
     {
-        Schema::table('company_permission_templates', function (Blueprint $table) {
-            // ✅ 1. حذف المفتاح الأجنبي القديم (إن وجد)
-            $table->dropForeign(['created_by']);
-        });
+        if (! Schema::hasTable('company_permission_templates')
+            || ! Schema::hasColumn('company_permission_templates', 'created_by')) {
+            return;
+        }
 
-        // ✅ 2. تعديل العمود ليشير إلى companies بدلاً من users
-        Schema::table('company_permission_templates', function (Blueprint $table) {
-            // ✅ تغيير نوع العمود إلى unsignedBigInteger (إذا لزم الأمر)
-            $table->unsignedBigInteger('created_by')->nullable()->change();
+        // New installations already point created_by to companies in the
+        // create-table migration. Existing MySQL installations are normalized
+        // here without assuming that the old foreign key exists.
+        if (DB::getDriverName() !== 'mysql') {
+            return;
+        }
 
-            // ✅ إضافة المفتاح الأجنبي الجديد指向 companies
-            $table->foreign('created_by')
-                ->references('id')
-                ->on('companies')
-                ->nullOnDelete();
-        });
+        DB::statement('ALTER TABLE `company_permission_templates` ENGINE=InnoDB');
+
+        $foreign = DB::table('information_schema.KEY_COLUMN_USAGE')
+            ->whereRaw('TABLE_SCHEMA = DATABASE()')
+            ->where('TABLE_NAME', 'company_permission_templates')
+            ->where('COLUMN_NAME', 'created_by')
+            ->whereNotNull('REFERENCED_TABLE_NAME')
+            ->first(['CONSTRAINT_NAME', 'REFERENCED_TABLE_NAME']);
+
+        if ($foreign && $foreign->REFERENCED_TABLE_NAME === 'companies') {
+            return;
+        }
+
+        if ($foreign) {
+            $constraint = str_replace('`', '``', (string) $foreign->CONSTRAINT_NAME);
+            DB::statement("ALTER TABLE `company_permission_templates` DROP FOREIGN KEY `{$constraint}`");
+        }
+
+        DB::statement(<<<'SQL'
+            UPDATE `company_permission_templates` t
+            LEFT JOIN `companies` c ON c.id = t.created_by
+            SET t.created_by = NULL
+            WHERE t.created_by IS NOT NULL AND c.id IS NULL
+        SQL);
+
+        DB::statement(<<<'SQL'
+            ALTER TABLE `company_permission_templates`
+            ADD CONSTRAINT `company_permission_templates_created_by_foreign`
+            FOREIGN KEY (`created_by`) REFERENCES `companies` (`id`)
+            ON DELETE SET NULL
+        SQL);
     }
 
     public function down(): void
     {
-        // ✅ التراجع: إعادة المفتاح الأجنبي إلى users
-        Schema::table('company_permission_templates', function (Blueprint $table) {
-            $table->dropForeign(['created_by']);
-            $table->foreign('created_by')
-                ->references('id')
-                ->on('users')
-                ->nullOnDelete();
-        });
+        // The corrected relationship is intentionally retained.
     }
 };

@@ -5,10 +5,18 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class CompanyJobCandidate extends Model
 {
     use HasFactory;
+
+    public const STATUS_PENDING = 'pending';
+    public const STATUS_IN_PROGRESS = 'in_progress';
+    public const STATUS_COMPLETED = 'completed';
+    public const STATUS_SHORTLISTED = 'shortlisted';
+    public const STATUS_REJECTED = 'rejected';
+    public const STATUS_HIRED = 'hired';
 
     protected $table = 'company_job_candidates';
 
@@ -16,7 +24,9 @@ class CompanyJobCandidate extends Model
         'company_job_id',
         'candidate_id',
         'interview_id',
+        'email_invitation_id',
         'status',
+        'identity_status',
         'final_score',
         'source',
         'company_notes',
@@ -32,13 +42,6 @@ class CompanyJobCandidate extends Model
         'completed_at' => 'datetime',
     ];
 
-    const STATUS_PENDING = 'pending';
-    const STATUS_IN_PROGRESS = 'in_progress';
-    const STATUS_COMPLETED = 'completed';
-    const STATUS_SHORTLISTED = 'shortlisted';
-    const STATUS_REJECTED = 'rejected';
-    const STATUS_HIRED = 'hired';
-
     public function job(): BelongsTo
     {
         return $this->belongsTo(CompanyJob::class, 'company_job_id');
@@ -46,12 +49,22 @@ class CompanyJobCandidate extends Model
 
     public function candidate(): BelongsTo
     {
-        return $this->belongsTo(User::class, 'candidate_id');
+        return $this->belongsTo(Candidate::class, 'candidate_id');
     }
 
     public function interview(): BelongsTo
     {
         return $this->belongsTo(Interview::class);
+    }
+
+    public function invitation(): BelongsTo
+    {
+        return $this->belongsTo(EmailInvitation::class, 'email_invitation_id');
+    }
+
+    public function identityVerification(): HasOne
+    {
+        return $this->hasOne(CandidateIdentityVerification::class, 'company_job_candidate_id');
     }
 
     public function updateStatus(string $status, ?string $notes = null): void
@@ -66,7 +79,7 @@ class CompanyJobCandidate extends Model
     {
         $this->update([
             'status' => self::STATUS_IN_PROGRESS,
-            'started_at' => now(),
+            'started_at' => $this->started_at ?? now(),
         ]);
     }
 
@@ -75,7 +88,7 @@ class CompanyJobCandidate extends Model
         $this->update([
             'status' => self::STATUS_COMPLETED,
             'final_score' => $score,
-            'completed_at' => now(),
+            'completed_at' => $this->completed_at ?? now(),
         ]);
     }
 }

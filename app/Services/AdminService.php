@@ -24,27 +24,49 @@ class AdminService
     /**
      * Get dashboard statistics
      */
-public function getDashboardStats(): array
+public function getDashboardStats(Admin $admin): array
 {
-    return [
-        'total_users' => User::count(),
-        'total_companies' => Company::count(),
-        'total_jobs' => CompanyJob::count(),
-        'total_interviews' => Interview::count(),
-        'completed_interviews' => Interview::where('status', 'completed_with_report')->count(),
-        'pending_companies' => Company::where('status', 'pending')->count(),
-        'active_jobs' => CompanyJob::where('status', 'active')->count(),
+    $permissions = $admin->getPermissionsByRole();
+    $can = fn (string $permission): bool => $admin->isSuperAdmin()
+        || in_array($permission, $permissions, true);
 
-        // ✅ فقط المستخدمين العاديين (وليس موظفي الشركات)
-        'recent_users' => User::where('role', 'user')
-            ->whereNull('company_id')  // ✅ استثناء موظفي الشركات
-            ->orWhere('is_company_employee', false)
-            ->orderBy('created_at', 'desc')
+    $stats = [];
+
+    if ($can('admin.users.view')) {
+        $stats['total_users'] = User::where('role', 'user')
+            ->where(function ($query) {
+                $query->whereNull('company_id')
+                    ->orWhere('is_company_employee', false);
+            })
+            ->count();
+
+        $stats['recent_users'] = User::where('role', 'user')
+            ->where(function ($query) {
+                $query->whereNull('company_id')
+                    ->orWhere('is_company_employee', false);
+            })
+            ->latest()
             ->take(5)
-            ->get(),
+            ->get();
+    }
 
-        'recent_companies' => Company::orderBy('created_at', 'desc')->take(5)->get(),
-    ];
+    if ($can('admin.companies.view')) {
+        $stats['total_companies'] = Company::count();
+        $stats['pending_companies'] = Company::where('status', 'pending')->count();
+        $stats['recent_companies'] = Company::latest()->take(5)->get();
+    }
+
+    if ($can('admin.jobs.view')) {
+        $stats['total_jobs'] = CompanyJob::count();
+        $stats['active_jobs'] = CompanyJob::where('status', 'active')->count();
+    }
+
+    if ($can('admin.interviews.view')) {
+        $stats['total_interviews'] = Interview::count();
+        $stats['completed_interviews'] = Interview::where('status', 'completed_with_report')->count();
+    }
+
+    return $stats;
 }
 
     /**
@@ -441,7 +463,7 @@ public function sendBroadcastNotification(string $title, string $message, string
             'email' => $data['email'],
             'password' => bcrypt($data['password']),
             'role' => 'admin',
-            'permissions' => $data['permissions'] ?? null,
+            'legacy_permissions' => $data['permissions'] ?? null,
             'last_login_at' => null,
         ]);
 

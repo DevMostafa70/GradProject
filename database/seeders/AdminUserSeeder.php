@@ -19,7 +19,7 @@ class AdminUserSeeder extends Seeder
                 'email' => 'admin@interviewai.com',
                 'password' => Hash::make('Admin@123456'),
                 'role' => 'super_admin',
-                'permissions' => null,
+                'legacy_permissions' => null,
                 'last_login_at' => null,
             ]);
 

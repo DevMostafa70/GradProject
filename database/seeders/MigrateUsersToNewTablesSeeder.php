@@ -79,7 +79,7 @@ class MigrateUsersToNewTablesSeeder extends Seeder
                     'email' => $user->email,
                     'password' => $user->password,
                     'role' => 'admin',
-                    'permissions' => ['*'],
+                    'legacy_permissions' => ['*'],
                     'email_verified_at' => $user->email_verified_at,
                     'created_at' => $user->created_at,
                     'updated_at' => $user->updated_at,

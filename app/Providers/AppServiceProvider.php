@@ -57,7 +57,7 @@ class AppServiceProvider extends ServiceProvider
 
         // للشركات
         RateLimiter::for('company', function (Request $request) {
-            return Limit::perMinute(80)->by($request->user()?->id ?: $request->ip());
+            return Limit::perMinute(200)->by($request->user()?->id ?: $request->ip());
         });
 
         // للأدمن
@@ -91,7 +91,7 @@ class AppServiceProvider extends ServiceProvider
 
         // تسجيل مخالفات الغش: 20 طلب في الدقيقة
         RateLimiter::for('anti-cheat', function (Request $request) {
-            return Limit::perMinute(20)->by($request->user()?->id ?: $request->ip());
+            return Limit::perMinute(30)->by($request->user()?->id ?: $request->ip());
         });
 
         // استئناف المقابلة: 10 طلبات في الساعة
@@ -126,7 +126,7 @@ class AppServiceProvider extends ServiceProvider
 
         // المقابلات العامة (للمرشحين): 30 طلب في الدقيقة
         RateLimiter::for('public-interview', function (Request $request) {
-            return Limit::perMinute(30)->by($request->ip());
+            return Limit::perMinute(50)->by($request->ip());
         });
     }
 }

@@ -2,104 +2,61 @@
 
 namespace App\Imports;
 
-use App\Jobs\SendInvitationEmailJob;
-use App\Models\Candidate;
 use App\Models\CompanyJob;
-use App\Models\CompanyJobCandidate;
-use App\Models\EmailInvitation;
+use App\Services\CompanyInterview\CandidateInvitationService;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
 use Maatwebsite\Excel\Concerns\ToCollection;
 use Maatwebsite\Excel\Concerns\WithChunkReading;
 use Maatwebsite\Excel\Concerns\WithHeadingRow;
+use Throwable;
 
+/**
+ * Backward-compatible queued import.
+ *
+ * The main UI now uses preview + confirm, but this class remains safe for any
+ * older code that still queues ContactsImport directly.
+ */
 class ContactsImport implements ToCollection, WithHeadingRow, WithChunkReading, ShouldQueue
 {
-    protected $job;
-
-    public function __construct(CompanyJob $job)
+    public function __construct(private readonly CompanyJob $job)
     {
-        $this->job = $job;
     }
 
-    public function collection(Collection $rows)
+    public function collection(Collection $rows): void
     {
-        Log::info('ContactsImport: Total rows received = ' . $rows->count());
+        $service = app(CandidateInvitationService::class);
 
         foreach ($rows as $index => $row) {
-            $email = trim($row['email']);
-            $name = trim($row['name'] ?? $email);
-            $phone = $row['phone'] ?? null;
+            $email = strtolower(trim((string) ($row['email'] ?? '')));
+            $name = trim((string) ($row['name'] ?? $email));
 
-            Log::info("Processing row {$index}: Email={$email}, Name={$name}");
-
-            if (empty($email)) {
-                Log::warning("Row {$index}: Email is empty, skipping");
+            if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                Log::warning('Skipped invalid candidate import row.', [
+                    'job_id' => $this->job->id,
+                    'row_number' => $index + 2,
+                    'email' => $email,
+                ]);
                 continue;
             }
 
-            // 1. التحقق من وجود مرشح مسبق لهذه الوظيفة
-            $existingCandidate = Candidate::where('email', $email)
-                ->where('company_job_id', $this->job->id)
-                ->first();
-
-            if ($existingCandidate) {
-                Log::info("Candidate already exists for job {$this->job->id}: {$email}");
-                continue;
-            }
-
-            // 2. التحقق من وجود دعوة مسبقة
-            $existingInvitation = EmailInvitation::where('email', $email)
-                ->where('company_job_id', $this->job->id)
-                ->exists();
-
-            if ($existingInvitation) {
-                Log::info("Invitation already exists for: {$email}");
-                continue;
-            }
-
-            // 3. إنشاء مرشح جديد في جدول candidates
             try {
-                $candidate = Candidate::create([
+                $service->createAndDispatch($this->job, [
+                    'row_number' => $index + 2,
                     'name' => $name,
                     'email' => $email,
-                    'phone' => $phone,
-                    'company_job_id' => $this->job->id,
-                    'invitation_token' => Str::random(64),
-                    'status' => 'pending',
-                    'invited_at' => now(),
+                    'phone' => $row['phone'] ?? null,
+                    'candidate_reference' => $row['candidate_reference'] ?? null,
+                    'notes' => $row['notes'] ?? null,
                 ]);
-                Log::info("✅ Candidate created: ID {$candidate->id}");
-
-                // ✅ إضافة سجل في company_job_candidates
-                CompanyJobCandidate::create([
-                    'company_job_id' => $this->job->id,
-                    'candidate_id' => $candidate->id,
-                    'status' => 'pending',
-                    'invited_at' => now(),
-                ]);
-                Log::info("✅ CompanyJobCandidate created for candidate: {$candidate->id}");
-            } catch (\Exception $e) {
-                Log::error("❌ Failed to create candidate: " . $e->getMessage());
-                continue;
-            }
-
-            // 4. إنشاء دعوة في جدول email_invitations
-            try {
-                $invitation = EmailInvitation::create([
+            } catch (Throwable $exception) {
+                Log::warning('Candidate invitation row was not imported.', [
+                    'job_id' => $this->job->id,
+                    'row_number' => $index + 2,
                     'email' => $email,
-                    'name' => $name,
-                    'company_job_id' => $this->job->id,
-                    'status' => 'pending',
+                    'error' => $exception->getMessage(),
                 ]);
-                Log::info("✅ Invitation created successfully: ID {$invitation->id}");
-
-                // 5. ✅ إرسال الإيميل مع تمرير التوكن الصحيح
-                SendInvitationEmailJob::dispatch($invitation, $this->job, $candidate->invitation_token);
-            } catch (\Exception $e) {
-                Log::error("❌ Failed to create invitation: " . $e->getMessage());
             }
         }
     }

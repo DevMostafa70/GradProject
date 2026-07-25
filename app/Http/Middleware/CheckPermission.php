@@ -2,116 +2,74 @@
 
 namespace App\Http\Middleware;
 
+use App\Models\Admin;
+use App\Models\Company;
+use App\Models\User;
+use App\Services\CompanyEmployeeAccessService;
 use Closure;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
+use Symfony\Component\HttpFoundation\Response;
+use Throwable;
 
-class CheckPermission
+final class CheckPermission
 {
-    public function handle(Request $request, Closure $next, ...$permissions)
+    public function handle(Request $request, Closure $next, ...$permissions): Response
     {
-        $user = auth('sanctum')->user();
+        $actor = $request->user();
 
-        if (!$user) {
+        if (! $actor) {
             return response()->json([
                 'success' => false,
                 'message' => 'Unauthenticated',
             ], 401);
         }
 
-        // ✅ تحديد الـ Guard المناسب
-        $guard = $this->getUserGuard($user);
-
-        // ✅ جلب صلاحيات المستخدم
-        $userPermissions = $this->getUserPermissions($user);
-
-        // ✅ التحقق من الصلاحيات
-        foreach ($permissions as $permission) {
-            if (in_array($permission, $userPermissions)) {
-                return $next($request);
-            }
-        }
-
-        // ✅ super_admin لديه كل الصلاحيات
-        if (method_exists($user, 'isSuperAdmin') && $user->isSuperAdmin()) {
+        // The super-admin role is intentionally unrestricted.
+        if ($actor instanceof Admin && $actor->isSuperAdmin()) {
             return $next($request);
         }
 
-        // ✅ company_owner لديه كل صلاحيات الشركة
-        if (method_exists($user, 'isCompanyOwner') && $user->isCompanyOwner()) {
-            foreach ($permissions as $permission) {
-                if (str_starts_with($permission, 'company.')) {
-                    return $next($request);
-                }
-            }
+        // A Company model is the company owner. Employees are User models and
+        // must never receive this owner bypass.
+        if ($actor instanceof Company
+            && collect($permissions)->contains(
+                static fn (string $permission): bool => str_starts_with($permission, 'company.')
+            )) {
+            return $next($request);
+        }
+
+        $effectivePermissions = $this->effectivePermissions($actor);
+
+        if (array_intersect($permissions, $effectivePermissions) !== []) {
+            return $next($request);
         }
 
         return response()->json([
             'success' => false,
             'message' => 'Unauthorized. You do not have the required permission.',
-            'required_permissions' => $permissions,
-            'your_permissions' => $userPermissions,
+            'required_permissions' => array_values($permissions),
+            'your_permissions' => $effectivePermissions,
         ], 403);
     }
 
-    /**
-     * تحديد الـ Guard المناسب للمستخدم
-     */
-    private function getUserGuard($user): string
+    /** @return array<int, string> */
+    private function effectivePermissions(object $actor): array
     {
-        if ($user instanceof \App\Models\Admin) {
-            return 'admin';
+        if ($actor instanceof Admin) {
+            return $actor->getPermissionsByRole();
         }
 
-        if ($user instanceof \App\Models\Company) {
-            return 'company';
+        if ($actor instanceof User && $actor->isCompanyEmployee()) {
+            return app(CompanyEmployeeAccessService::class)->permissionNames($actor);
         }
 
-        if ($user instanceof \App\Models\User) {
-            if ($user->isCompanyEmployee()) {
-                return 'company';
+        try {
+            if (method_exists($actor, 'getAllPermissions')) {
+                return $actor->getAllPermissions()->pluck('name')->values()->all();
             }
-            return 'user';
-        }
-
-        return 'web';
-    }
-
-    /**
-     * جلب صلاحيات المستخدم
-     */
-    private function getUserPermissions($user): array
-    {
-        // ✅ إذا كان المستخدم Admin
-        if ($user instanceof \App\Models\Admin) {
-            // ✅ استخدام getPermissionsByRole() مباشرة
-            return $user->getPermissionsByRole();
-        }
-
-        // ✅ إذا كان المستخدم Company
-        if ($user instanceof \App\Models\Company) {
-            try {
-                $permissions = $user->getAllPermissions();
-                if ($permissions && $permissions->isNotEmpty()) {
-                    return $permissions->pluck('name')->toArray();
-                }
-            } catch (\Exception $e) {
-                return [];
-            }
-            return [];
-        }
-
-        // ✅ إذا كان المستخدم User
-        if ($user instanceof \App\Models\User) {
-            try {
-                $permissions = $user->getAllPermissions();
-                if ($permissions && $permissions->isNotEmpty()) {
-                    return $permissions->pluck('name')->toArray();
-                }
-            } catch (\Exception $e) {
-                return [];
-            }
-            return [];
+        } catch (Throwable) {
+            // Mixed legacy guard rows are handled by the normalization
+            // migration. Until it runs, deny access rather than guessing.
         }
 
         return [];

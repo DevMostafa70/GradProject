@@ -23,9 +23,9 @@ class AdminController extends Controller
     /**
      * Get dashboard statistics
      */
-    public function dashboard(): JsonResponse
+    public function dashboard(Request $request): JsonResponse
     {
-        $stats = $this->adminService->getDashboardStats();
+        $stats = $this->adminService->getDashboardStats($request->user());
 
         return response()->json([
             'success' => true,

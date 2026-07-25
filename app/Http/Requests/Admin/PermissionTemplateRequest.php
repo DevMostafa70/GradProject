@@ -9,9 +9,7 @@ class PermissionTemplateRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        // ✅ فقط super_admin يمكنه إنشاء/تعديل/حذف القوالب
-        $user = $this->user();
-        return $user && $user->isSuperAdmin();
+        return (bool) $this->user()?->isSuperAdmin();
     }
 
     public function rules(): array
@@ -25,10 +23,13 @@ class PermissionTemplateRequest extends FormRequest
                 'max:255',
                 Rule::unique('permission_templates', 'name')->ignore($templateId),
             ],
-            'description' => 'nullable|string|max:1000',
-            'permissions' => 'required|array|min:1',
-            'permissions.*' => 'string|exists:permissions,name',
-            'is_active' => 'nullable|boolean',
+            'description' => ['nullable', 'string', 'max:1000'],
+            'permissions' => ['required', 'array', 'min:1'],
+            'permissions.*' => [
+                'string',
+                Rule::exists('permissions', 'name')->where('guard_name', 'admin'),
+            ],
+            'is_active' => ['nullable', 'boolean'],
         ];
     }
 
@@ -39,7 +40,7 @@ class PermissionTemplateRequest extends FormRequest
             'name.unique' => 'هذا الاسم مستخدم بالفعل',
             'permissions.required' => 'يجب تحديد صلاحية واحدة على الأقل',
             'permissions.min' => 'يجب تحديد صلاحية واحدة على الأقل',
-            'permissions.*.exists' => 'الصلاحية المحددة غير موجودة',
+            'permissions.*.exists' => 'الصلاحية المحددة غير موجودة ضمن صلاحيات الأدمن',
         ];
     }
 }

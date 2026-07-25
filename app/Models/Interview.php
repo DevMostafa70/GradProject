@@ -18,6 +18,10 @@ class Interview extends Model
     protected $fillable = [
         'user_id',
         'candidate_id',
+        'company_job_id',
+        'company_job_candidate_id',
+        'email_invitation_id',
+        'interview_type',
         'position',
         'experience_level',
         'difficulty',
@@ -30,6 +34,8 @@ class Interview extends Model
         'metadata',
         // 🔹 NEW: Session Management
         'session_token',
+        'public_session_token_hash',
+        'browser_secret_hash',
         'expires_at',
         'last_activity_at',
         'current_question_id',
@@ -38,11 +44,27 @@ class Interview extends Model
         'active_session_id',
         'session_initialized_at',
         'device_fingerprint',
+        'session_instance_id',
+        'resume_count',
+        'max_resume_count',
+        'last_heartbeat_at',
+        'last_resume_at',
+        'resume_locked_at',
+        'resume_lock_reason',
+        'consent_accepted_at',
+        'captured_snapshot_count',
 
         'report_generation_started_at',
         'report_generation_completed_at',
         'report_generation_attempts',
 
+    ];
+
+    protected $hidden = [
+        'session_token',
+        'public_session_token_hash',
+        'browser_secret_hash',
+        'device_fingerprint',
     ];
 
     protected $casts = [
@@ -56,6 +78,13 @@ class Interview extends Model
         'answered_questions_count' => 'integer',
 
         'session_initialized_at' => 'datetime',
+        'resume_count' => 'integer',
+        'max_resume_count' => 'integer',
+        'last_heartbeat_at' => 'datetime',
+        'last_resume_at' => 'datetime',
+        'resume_locked_at' => 'datetime',
+        'consent_accepted_at' => 'datetime',
+        'captured_snapshot_count' => 'integer',
 
         'report_generation_started_at' => 'datetime',
         'report_generation_completed_at' => 'datetime',
@@ -78,9 +107,39 @@ class Interview extends Model
         return $this->belongsTo(User::class);
     }
 
-    public function candidate()
+    public function candidate(): BelongsTo
     {
         return $this->belongsTo(Candidate::class, 'candidate_id');
+    }
+
+    public function companyJob(): BelongsTo
+    {
+        return $this->belongsTo(CompanyJob::class, 'company_job_id');
+    }
+
+    public function companyJobCandidate(): BelongsTo
+    {
+        return $this->belongsTo(CompanyJobCandidate::class, 'company_job_candidate_id');
+    }
+
+    public function emailInvitation(): BelongsTo
+    {
+        return $this->belongsTo(EmailInvitation::class, 'email_invitation_id');
+    }
+
+    public function identityVerification(): HasOne
+    {
+        return $this->hasOne(CandidateIdentityVerification::class);
+    }
+
+    public function candidateSessionEvents(): HasMany
+    {
+        return $this->hasMany(CandidateInterviewSessionEvent::class);
+    }
+
+    public function snapshotRequests(): HasMany
+    {
+        return $this->hasMany(CandidateInterviewSnapshotRequest::class);
     }
 
     public function questions(): HasMany
@@ -704,6 +763,11 @@ class Interview extends Model
             'has_final_report' => $this->finalReport()->exists(),
         ];
     }
+    public function isCompanyCandidateInterview(): bool
+    {
+        return $this->interview_type === 'company_candidate';
+    }
+
     /**
      * Return the interview language as one of the supported locale codes.
      */

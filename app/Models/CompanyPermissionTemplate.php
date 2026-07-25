@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class CompanyPermissionTemplate extends Model
 {
@@ -44,6 +45,12 @@ class CompanyPermissionTemplate extends Model
         return $this->belongsTo(Company::class, 'created_by');
     }
 
+
+    public function employees(): HasMany
+    {
+        return $this->hasMany(User::class, 'company_permission_template_id');
+    }
+
     // ============================================================
     // ✅ Scopes
     // ============================================================
@@ -60,8 +67,10 @@ class CompanyPermissionTemplate extends Model
 
     public function scopeSearch($query, string $search)
     {
-        return $query->where('name', 'LIKE', "%{$search}%")
-            ->orWhere('description', 'LIKE', "%{$search}%");
+        return $query->where(function ($searchQuery) use ($search) {
+            $searchQuery->where('name', 'LIKE', "%{$search}%")
+                ->orWhere('description', 'LIKE', "%{$search}%");
+        });
     }
 
     // ============================================================

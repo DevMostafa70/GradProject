@@ -16,6 +16,7 @@ class PermissionTemplateResource extends JsonResource
             'description' => $this->description,
             'permissions' => $this->permissions,
             'permissions_count' => $this->permissions_count,
+            'admins_count' => $this->whenCounted('admins'),
             'is_active' => $this->is_active,
             'created_by' => [
                 'id' => $this->creator?->id,

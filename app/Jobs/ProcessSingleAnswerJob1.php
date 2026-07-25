@@ -162,53 +162,53 @@ class ProcessSingleAnswerJob implements ShouldQueue
             // ============================================================
             $transcript = $this->answer->transcription ?? '';
             $safeTranscript = $transcript;
-            // $useFallbackEvaluation = false;
-            // $fallbackEvaluation = null;
-            // $detection = null;
+            $useFallbackEvaluation = false;
+            $fallbackEvaluation = null;
+            $detection = null;
 
-            // if (!empty($transcript)) {
-            //     $guard = new PromptInjectionGuard();
-            //     $processed = $guard->process($transcript);
+            if (!empty($transcript)) {
+                $guard = new PromptInjectionGuard();
+                $processed = $guard->process($transcript);
 
-            //     // If prompt injection was detected
-            //     if ($processed['detection']['detected']) {
-            //         Log::warning('Prompt injection detected in answer', [
-            //             'answer_id' => $this->answer->id,
-            //             'risk_level' => $processed['detection']['risk_level'],
-            //             'risk_score' => $processed['detection']['risk_score'],
-            //         ]);
+                // If prompt injection was detected
+                if ($processed['detection']['detected']) {
+                    Log::warning('Prompt injection detected in answer', [
+                        'answer_id' => $this->answer->id,
+                        'risk_level' => $processed['detection']['risk_level'],
+                        'risk_score' => $processed['detection']['risk_score'],
+                    ]);
 
-            //         // Log the violation
-            //         $this->logPromptInjection(
-            //             $this->answer->interview,
-            //             $processed['detection']
-            //         );
+                    // Log the violation
+                    $this->logPromptInjection(
+                        $this->answer->interview,
+                        $processed['detection']
+                    );
 
-            //         // If risk is critical or high, use fallback evaluation
-            //         if (in_array($processed['detection']['risk_level'], ['critical', 'high'])) {
-            //             $useFallbackEvaluation = true;
-            //             $fallbackEvaluation = $guard->getFallbackEvaluation(
-            //                 $transcript,
-            //                 $processed['sanitized'],
-            //                 $processed['detection']
-            //             );
-            //             $safeTranscript = $processed['sanitized'];
-            //             $detection = $processed['detection'];
+                    // If risk is critical or high, use fallback evaluation
+                    if (in_array($processed['detection']['risk_level'], ['critical', 'high'])) {
+                        $useFallbackEvaluation = true;
+                        $fallbackEvaluation = $guard->getFallbackEvaluation(
+                            $transcript,
+                            $processed['sanitized'],
+                            $processed['detection']
+                        );
+                        $safeTranscript = $processed['sanitized'];
+                        $detection = $processed['detection'];
 
-            //             Log::warning('Using fallback evaluation due to high-risk prompt injection', [
-            //                 'answer_id' => $this->answer->id,
-            //                 'risk_level' => $processed['detection']['risk_level'],
-            //             ]);
-            //         } else {
-            //             // Medium or low risk: use sanitized transcript
-            //             $safeTranscript = $processed['sanitized'];
-            //             Log::info('Using sanitized transcript for evaluation', [
-            //                 'answer_id' => $this->answer->id,
-            //                 'risk_level' => $processed['detection']['risk_level'],
-            //             ]);
-            //         }
-            //     }
-            // }
+                        Log::warning('Using fallback evaluation due to high-risk prompt injection', [
+                            'answer_id' => $this->answer->id,
+                            'risk_level' => $processed['detection']['risk_level'],
+                        ]);
+                    } else {
+                        // Medium or low risk: use sanitized transcript
+                        $safeTranscript = $processed['sanitized'];
+                        Log::info('Using sanitized transcript for evaluation', [
+                            'answer_id' => $this->answer->id,
+                            'risk_level' => $processed['detection']['risk_level'],
+                        ]);
+                    }
+                }
+            }
 
             // ============================================================
             // Step 4: Evaluate answer using AI with real transcription

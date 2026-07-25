@@ -14,45 +14,49 @@ class JobInvitationMail extends Mailable
 {
     use Queueable, SerializesModels;
 
-    public EmailInvitation $invitation;
-    public CompanyJob $job;
-    public string $invitationToken; // ✅ جديد
-
-    public function __construct(EmailInvitation $invitation, CompanyJob $job, string $invitationToken)
-    {
-        $this->invitation = $invitation;
-        $this->job = $job;
-        $this->invitationToken = $invitationToken; // ✅ حفظ التوكن
+    public function __construct(
+        public EmailInvitation $invitation,
+        public CompanyJob $job,
+        private readonly string $invitationToken,
+    ) {
     }
 
     public function envelope(): Envelope
     {
+        $locale = $this->job->normalizedInterviewLocale();
+        $jobTitle = $this->job->titleForLocale($locale);
+
         return new Envelope(
-            subject: "دعوة لمقابلة وظيفية - {$this->job->title}",
+            subject: $locale === 'ar'
+                ? "دعوة لمقابلة وظيفية - {$jobTitle}"
+                : "Job interview invitation - {$jobTitle}",
         );
     }
 
     public function content(): Content
     {
+        $locale = $this->job->normalizedInterviewLocale();
+
         return new Content(
             view: 'emails.job-invitation',
             with: [
                 'candidateName' => $this->invitation->name,
-                'jobTitle' => $this->job->title,
+                'jobTitle' => $this->job->titleForLocale($locale),
                 'companyName' => $this->job->company->company_name,
-                'invitationLink' => $this->getInvitationLink(),
+                'invitationLink' => $this->invitationLink(),
                 'skills' => $this->job->required_skills,
+                'locale' => $locale,
+                'expiresAt' => $this->invitation->expires_at,
+                'validHours' => $this->job->invitation_valid_hours,
+                'identityRequired' => (bool) $this->job->identity_verification_required,
             ],
         );
     }
 
-    private function getInvitationLink(): string
+    private function invitationLink(): string
     {
-        // ✅ استخدم التوكن الصحيح
-        $token = $this->invitationToken;
-        $email = urlencode($this->invitation->email);
-        $name = urlencode($this->invitation->name);
+        $baseUrl = rtrim((string) config('company_interviews.frontend_url'), '/');
 
-        return url("/interview/join/{$token}?email={$email}&name={$name}");
+        return "{$baseUrl}/company-interview/{$this->invitationToken}";
     }
 }

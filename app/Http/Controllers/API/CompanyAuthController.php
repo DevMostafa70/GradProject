@@ -5,6 +5,7 @@ namespace App\Http\Controllers\API;
 use App\Http\Controllers\Controller;
 use App\Models\Company;
 use App\Models\User;
+use App\Services\CompanyEmployeeAccessService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -75,7 +76,7 @@ public function register(Request $request): JsonResponse
  * Login company or employee
  * POST /api/company/login
  */
-public function login(Request $request): JsonResponse
+public function login(Request $request, CompanyEmployeeAccessService $accessService): JsonResponse
 {
     $request->validate([
         'email' => 'required|email',
@@ -157,10 +158,10 @@ public function login(Request $request): JsonResponse
 
     // ✅ التحقق من أن الشركة لا تزال نشطة
     $company = $employee->company;
-    if ($company && $company->status !== 'approved') {
+    if (! $company || $company->status !== 'approved') {
         return response()->json([
             'success' => false,
-            'message' => 'Your company account is not active. Please contact support.',
+            'message' => 'Your company account is missing or not active. Please contact support.',
             'error_code' => 'COMPANY_INACTIVE',
         ], 403);
     }
@@ -168,8 +169,9 @@ public function login(Request $request): JsonResponse
     $employee->tokens()->delete();
     $token = $employee->createToken('company-token')->plainTextToken;
 
-    // ✅ جلب الصلاحيات من guard = user
-    $permissions = $employee->getAllPermissions()->pluck('name');
+    // Company employees are User models; resolve only user-guard access.
+    $permissions = collect($accessService->permissionNames($employee));
+    $employeeRoles = collect($accessService->roleNames($employee));
 
     return response()->json([
         'success' => true,
@@ -179,13 +181,13 @@ public function login(Request $request): JsonResponse
                 'id' => $employee->id,
                 'name' => $employee->name,
                 'email' => $employee->email,
-                'status' => $company?->status ?? 'active',
-                'roles' => $employee->getRoleNames(),
+                'status' => $company->status,
+                'roles' => $employeeRoles,
                 'all_permissions' => $permissions,
                 'is_company_owner' => false,
                 'is_company_employee' => true,
                 'company_id' => $employee->company_id,
-                'company_name' => $company?->company_name,
+                'company_name' => $company->company_name,
             ],
             'token' => $token,
             'token_type' => 'Bearer',
@@ -203,7 +205,7 @@ private function getEmployeePermissions($user): array
             ->where('model_id', $user->id)
             ->where('model_type', 'App\\Models\\User')
             ->join('permissions', 'model_has_permissions.permission_id', '=', 'permissions.id')
-            ->where('permissions.guard_name', 'company')
+            ->where('permissions.guard_name', 'user')
             ->pluck('permissions.name')
             ->toArray();
     } catch (\Exception $e) {
@@ -244,11 +246,61 @@ private function getEmployeeInfo($user): ?array
      */
     public function logout(Request $request): JsonResponse
     {
-        $request->user()->currentAccessToken()->delete();
+        $request->user()->currentAccessToken()?->delete();
 
         return response()->json([
             'success' => true,
             'message' => 'Logged out successfully',
+        ]);
+    }
+
+    /**
+     * Return the authenticated company account and its effective permissions.
+     * Works for both the company owner and company employees.
+     */
+    public function me(Request $request, CompanyEmployeeAccessService $accessService): JsonResponse
+    {
+        $actor = $request->user();
+        $company = $this->resolveCompany($request);
+        $isOwner = $actor instanceof Company;
+
+        if ($actor instanceof User) {
+            $permissions = collect($accessService->permissionNames($actor));
+            $roles = collect($accessService->roleNames($actor));
+        } else {
+            try {
+                $permissions = $actor->getAllPermissions()->pluck('name')->values();
+                $roles = $actor->getRoleNames()->values();
+            } catch (\Throwable) {
+                $permissions = collect();
+                $roles = collect();
+            }
+        }
+
+        $account = [
+            'id' => $actor->id,
+            'name' => $isOwner ? $company->company_name : $actor->name,
+            'company_name' => $company->company_name,
+            'email' => $actor->email,
+            'status' => $company->status,
+            'roles' => $roles,
+            'all_permissions' => $permissions,
+            'permissions' => $permissions,
+            'is_company_owner' => $isOwner,
+            'is_company_employee' => ! $isOwner,
+            'company_id' => $company->id,
+            'company_permission_template_id' => $isOwner
+                ? null
+                : $actor->company_permission_template_id,
+        ];
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'account' => $account,
+                // Kept for backward compatibility with the current frontend.
+                'company' => $account,
+            ],
         ]);
     }
 
@@ -361,7 +413,7 @@ private function getEmployeeInfo($user): ?array
      */
     public function notifications(Request $request): JsonResponse
     {
-        $company = $request->user();
+        $company = $this->resolveCompany($request);
 
         // ✅ Debug: تحقق من وجود المستخدم
         Log::info('Company notifications request', [
@@ -411,7 +463,7 @@ private function getEmployeeInfo($user): ?array
      */
     public function markNotificationAsRead(Request $request, string $id): JsonResponse
     {
-        $company = $request->user();
+        $company = $this->resolveCompany($request);
         $notification = $company->notifications()->find($id);
 
         if (!$notification) {
@@ -436,7 +488,7 @@ private function getEmployeeInfo($user): ?array
  */
 public function deleteAllNotifications(Request $request): JsonResponse
 {
-    $company = $request->user();
+    $company = $this->resolveCompany($request);
     $deleted = $company->notifications()->delete();
 
     return response()->json([
@@ -454,7 +506,7 @@ public function deleteAllNotifications(Request $request): JsonResponse
  */
 public function deleteNotification(Request $request, string $id): JsonResponse
 {
-    $company = $request->user();
+    $company = $this->resolveCompany($request);
     $notification = $company->notifications()->find($id);
 
     if (!$notification) {
@@ -471,4 +523,20 @@ public function deleteNotification(Request $request, string $id): JsonResponse
         'message' => 'Notification deleted successfully',
     ]);
 }
+
+    private function resolveCompany(Request $request): Company
+    {
+        $actor = $request->user();
+
+        if ($actor instanceof Company) {
+            return $actor;
+        }
+
+        if ($actor instanceof User && $actor->isCompanyEmployee() && $actor->company) {
+            return $actor->company;
+        }
+
+        abort(403, 'Company not found or unauthorized.');
+    }
+
 }

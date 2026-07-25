@@ -1,35 +1,27 @@
 <?php
-// app/Http/Requests/Company/UpdateEmployeeRequest.php
 
 namespace App\Http\Requests\Company;
 
+use App\Models\Company;
+use App\Support\CompanyEmployeePermissionCatalog;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
 
-class UpdateEmployeeRequest extends FormRequest
+final class UpdateEmployeeRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        $user = $this->user();
-
-        if (!$user) {
-            return false;
-        }
-
-        // ✅ التحقق من أن المستخدم هو Company Owner
-        try {
-            return $user->hasRole('company_owner');
-        } catch (\Exception $e) {
-            return $user->hasPermissionTo('company.employees.update');
-        }
+        return $this->user() instanceof Company;
     }
 
     public function rules(): array
     {
-        $employeeId = $this->route('employee');
+        $companyId = $this->user()?->getKey() ?? 0;
+        $employeeId = $this->route('employee')?->getKey();
 
         return [
-            'name' => 'sometimes|string|max:255',
+            'name' => ['sometimes', 'string', 'max:255'],
             'email' => [
                 'sometimes',
                 'string',
@@ -37,13 +29,42 @@ class UpdateEmployeeRequest extends FormRequest
                 'max:255',
                 Rule::unique('users', 'email')->ignore($employeeId),
             ],
-            'password' => 'nullable|string|min:8|confirmed',
-            'template_id' => 'nullable|exists:company_permission_templates,id',
-            'permissions' => 'nullable|array|min:1',
-            'permissions.*' => 'string|exists:permissions,name',
-            'role' => 'nullable|string|exists:roles,name',
-            'is_active' => 'nullable|boolean',
+            'password' => ['nullable', 'string', 'min:8', 'confirmed'],
+            'template_id' => [
+                'nullable',
+                'integer',
+                Rule::exists('company_permission_templates', 'id')
+                    ->where(fn ($query) => $query
+                        ->where('company_id', $companyId)
+                        ->where('is_active', true)
+                        ->whereNull('deleted_at')),
+            ],
+            'permissions' => ['nullable', 'array', 'min:1'],
+            'permissions.*' => [
+                'string',
+                Rule::in(CompanyEmployeePermissionCatalog::ASSIGNABLE),
+                Rule::exists('permissions', 'name')
+                    ->where(fn ($query) => $query->where('guard_name', 'user')),
+            ],
+            'role' => [
+                'nullable',
+                'string',
+                Rule::in(CompanyEmployeePermissionCatalog::ROLES),
+            ],
+            'is_active' => ['nullable', 'boolean'],
         ];
+    }
+
+    public function withValidator(Validator $validator): void
+    {
+        $validator->after(function (Validator $validator): void {
+            if ($this->filled('template_id') && $this->has('permissions')) {
+                $validator->errors()->add(
+                    'access',
+                    'Send either a permission template or custom permissions, not both.'
+                );
+            }
+        });
     }
 
     public function messages(): array
@@ -52,9 +73,10 @@ class UpdateEmployeeRequest extends FormRequest
             'email.unique' => 'هذا البريد مستخدم بالفعل',
             'password.min' => 'كلمة المرور يجب أن تكون 8 أحرف على الأقل',
             'password.confirmed' => 'تأكيد كلمة المرور غير متطابق',
-            'template_id.exists' => 'القالب المحدد غير موجود',
-            'permissions.*.exists' => 'الصلاحية المحددة غير موجودة',
-            'role.exists' => 'الدور المحدد غير موجود',
+            'template_id.exists' => 'القالب المحدد غير موجود أو غير فعال في شركتك',
+            'permissions.*.in' => 'تتضمن القائمة صلاحية لا يمكن إسنادها لموظف شركة',
+            'permissions.*.exists' => 'الصلاحية المحددة غير موجودة ضمن guard المستخدم',
+            'role.in' => 'الدور المحدد غير صالح لموظف شركة',
         ];
     }
 }

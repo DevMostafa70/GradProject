@@ -2,154 +2,72 @@
 
 namespace App\Http\Middleware;
 
+use App\Models\Admin;
+use App\Models\Company;
+use App\Models\User;
+use App\Services\CompanyEmployeeAccessService;
 use Closure;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
+use Symfony\Component\HttpFoundation\Response;
+use Throwable;
 
-class CheckRole
+final class CheckRole
 {
-    public function handle(Request $request, Closure $next, ...$roles)
+    public function handle(Request $request, Closure $next, ...$roles): Response
     {
-        $user = auth('sanctum')->user();
+        $actor = $request->user();
 
-        if (!$user) {
+        if (! $actor) {
             return response()->json([
                 'success' => false,
                 'message' => 'Unauthenticated',
             ], 401);
         }
 
-        // ✅ جلب أدوار المستخدم
-        $userRoles = $this->getUserRoles($user);
+        $effectiveRoles = $this->effectiveRoles($actor);
 
-        // ✅ جلب صلاحيات المستخدم
-        $userPermissions = $this->getUserPermissions($user);
-
-        \Illuminate\Support\Facades\Log::info('CheckRole Middleware', [
-            'user_id' => $user->id ?? null,
-            'user_type' => get_class($user),
-            'user_roles' => $userRoles,
-            'user_permissions' => $userPermissions,
-            'required_roles' => $roles,
-        ]);
-
-        // ✅ 1. التحقق من الأدوار المطلوبة
-        $hasRole = false;
-        foreach ($roles as $role) {
-            if (in_array($role, $userRoles)) {
-                $hasRole = true;
-                break;
-            }
+        if (array_intersect($roles, $effectiveRoles) !== []) {
+            return $next($request);
         }
 
-        // ✅ 2. إذا لم يكن لديه دور، تحقق من الصلاحيات
-        if (!$hasRole) {
-            // ✅ التحقق من وجود أي صلاحية تبدأ بـ 'company.' (للموظفين)
-            foreach ($userPermissions as $permission) {
-                if (str_starts_with($permission, 'company.')) {
-                    $hasRole = true;
-                    break;
-                }
-            }
-        }
-
-        // ✅ 3. إذا كان لديه صلاحيات company.*، اسمح له بالدخول
-        if (!$hasRole) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Unauthorized. You do not have the required role or permissions.',
-                'required_roles' => $roles,
-                'your_roles' => $userRoles,
-                'your_permissions' => $userPermissions,
-            ], 403);
-        }
-
-        return $next($request);
+        return response()->json([
+            'success' => false,
+            'message' => 'Unauthorized. You do not have the required role.',
+            'required_roles' => array_values($roles),
+            'your_roles' => $effectiveRoles,
+        ], 403);
     }
 
-    /**
-     * الحصول على أدوار المستخدم
-     */
-    private function getUserRoles($user): array
+    /** @return array<int, string> */
+    private function effectiveRoles(object $actor): array
     {
-        try {
-            if (method_exists($user, 'getRoleNames')) {
-                $roles = $user->getRoleNames();
-                if ($roles && $roles->isNotEmpty()) {
-                    return $roles->toArray();
-                }
-            }
-        } catch (\Exception $e) {
-            \Illuminate\Support\Facades\Log::warning('CheckRole: Spatie role fetch failed', [
-                'error' => $e->getMessage(),
-                'user_type' => get_class($user),
-            ]);
+        if ($actor instanceof Admin) {
+            // admins.role is the canonical source; stale Spatie rows cannot
+            // elevate a normal admin to super_admin.
+            return [$actor->role ?? 'admin'];
         }
 
-        // Fallback
-        if ($user instanceof \App\Models\Admin) {
-            return [$user->role ?? 'admin'];
-        }
-
-        if ($user instanceof \App\Models\Company) {
+        if ($actor instanceof Company) {
             return ['company_owner'];
         }
 
-        if ($user instanceof \App\Models\User) {
-            if ($user->isCompanyEmployee()) {
-                return ['company_employee'];
-            }
-            return ['regular_user'];
+        if ($actor instanceof User && $actor->isCompanyEmployee()) {
+            $roles = app(CompanyEmployeeAccessService::class)->roleNames($actor);
+
+            return $roles !== [] ? $roles : ['company_employee'];
         }
 
-        return ['unknown'];
-    }
-
-/**
- * الحصول على صلاحيات المستخدم
- */
-private function getUserPermissions($user): array
-{
-    try {
-        // ✅ إذا كان المستخدم Admin
-        if ($user instanceof \App\Models\Admin) {
-            // ✅ استخدام getPermissionsByRole() بدلاً من getAllPermissions()
-            return $user->getPermissionsByRole();
-        }
-
-        // ✅ إذا كان المستخدم Company
-        if ($user instanceof \App\Models\Company) {
-            try {
-                $permissions = $user->getAllPermissions();
-                if ($permissions && $permissions->isNotEmpty()) {
-                    return $permissions->pluck('name')->toArray();
+        try {
+            if (method_exists($actor, 'getRoleNames')) {
+                $roles = $actor->getRoleNames()->values()->all();
+                if ($roles !== []) {
+                    return $roles;
                 }
-            } catch (\Exception $e) {
-                return [];
             }
-            return [];
+        } catch (Throwable) {
+            // Deny by default when legacy role rows are inconsistent.
         }
 
-        // ✅ إذا كان المستخدم User (عادي أو موظف)
-        if ($user instanceof \App\Models\User) {
-            try {
-                $permissions = $user->getAllPermissions();
-                if ($permissions && $permissions->isNotEmpty()) {
-                    return $permissions->pluck('name')->toArray();
-                }
-            } catch (\Exception $e) {
-                return [];
-            }
-            return [];
-        }
-
-        return [];
-    } catch (\Exception $e) {
-        \Illuminate\Support\Facades\Log::warning('CheckRole: Failed to get permissions', [
-            'error' => $e->getMessage(),
-            'user_type' => get_class($user),
-        ]);
-        return [];
+        return $actor instanceof User ? ['regular_user'] : ['unknown'];
     }
-}
 }
