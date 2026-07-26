@@ -6,6 +6,7 @@ use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Illuminate\Support\ServiceProvider;
 use App\Listeners\Billing\HandleStripeWebhookReceived;
 use App\Models\Company;
@@ -42,6 +43,21 @@ class AppServiceProvider extends ServiceProvider
 
         // للمصادقة (تسجيل الدخول)
         RateLimiter::for('auth', function (Request $request) {
+            return Limit::perMinute(10)->by($request->ip());
+        });
+
+        // Password-reset request: strict limits by email and IP.
+        RateLimiter::for('password-reset-request', function (Request $request) {
+            $email = Str::lower(trim((string) $request->input('email', 'unknown')));
+
+            return [
+                Limit::perMinute(3)->by($email . '|' . $request->ip()),
+                Limit::perHour(10)->by($request->ip()),
+            ];
+        });
+
+        // Password-reset submissions. Invalid tokens are deliberately limited.
+        RateLimiter::for('password-reset', function (Request $request) {
             return Limit::perMinute(10)->by($request->ip());
         });
 

@@ -220,8 +220,12 @@ class PublicCompanyInterviewController extends Controller
                 );
             }
 
-            $questions = DB::transaction(function () use ($job, $interview, $verification): array {
-                $questions = $this->questionService->createQuestions($job, $interview);
+            // Generate questions before opening the state-update
+            // transaction. This matches the normal-user interview flow and
+            // avoids holding database locks during the external OpenAI call.
+            $questions = $this->questionService->createQuestions($job, $interview);
+
+            DB::transaction(function () use ($job, $interview, $verification): void {
                 $sessionExpiresAt = now()->addMinutes((int) $job->interview_duration_minutes);
 
                 if ($interview->email_invitation_id) {
@@ -252,9 +256,7 @@ class PublicCompanyInterviewController extends Controller
                     'started_at' => $verification->jobCandidate?->started_at ?? now(),
                     'identity_status' => $verification->status,
                 ])->save();
-
-                return $questions;
-            });
+            }, 3);
 
             $estimatedSeconds = max(
                 120,

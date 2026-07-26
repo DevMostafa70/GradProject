@@ -81,47 +81,74 @@ class QuestionBankService
         int $candidateId,
         LLMService $llmService
     ): array {
+        $requiredCount = max(1, $job->getTotalQuestionsPerCandidate());
+        $source = $job->questions_source ?? 'mixed';
         $allQuestions = [];
 
-        // 1. Get company questions from bank
-        if ($job->company_questions_count > 0 && $job->question_bank_id) {
+        $companyCount = match ($source) {
+            'ai_only' => 0,
+            'company_only' => $requiredCount,
+            default => min(
+                max(0, (int) $job->company_questions_count),
+                $requiredCount
+            ),
+        };
+
+        if ($companyCount > 0 && $job->question_bank_id) {
             $companyQuestions = $this->selectRandomQuestions(
                 $job,
                 $candidateId,
-                $job->company_questions_count
+                $companyCount
             );
 
-            foreach ($companyQuestions as $index => $q) {
+            foreach ($companyQuestions as $index => $question) {
                 $allQuestions[] = [
-                    'question_text' => $q['question'],
-                    'type' => $q['type'] ?? 'behavioral',
+                    'question_text' => $question['question'] ?? '',
+                    'type' => $question['type'] ?? 'behavioral',
                     'source' => 'company',
-                    'expected_skills' => $job->required_skills,
-                    'evaluation_criteria' => ['clarity', 'relevance', 'depth'],
+                    'expected_skills' => $question['expected_skills'] ?? $job->required_skills,
+                    'evaluation_criteria' => $question['evaluation_criteria'] ?? ['clarity', 'relevance', 'depth'],
+                    'time_allocation_seconds' => $question['time_allocation_seconds'] ?? 120,
                     'question_bank_index' => $index,
                 ];
             }
         }
 
-        // 2. Get AI-generated questions
-        if ($job->ai_questions_count > 0 && $job->questions_source !== 'company_only') {
-            $aiQuestions = $this->generateAIQuestions($job, $llmService);
+        $aiCount = $source === 'company_only'
+            ? 0
+            : max(0, $requiredCount - count($allQuestions));
 
-            foreach ($aiQuestions as $q) {
+        if ($aiCount > 0) {
+            $aiQuestions = $llmService->generateQuestionsForJob(
+                $job,
+                null,
+                $aiCount,
+                [
+                    'generation_scope' => 'legacy_company_question_bank_flow',
+                    'excluded_questions' => array_values(array_filter(array_map(
+                        fn (array $question): string => trim((string) ($question['question_text'] ?? '')),
+                        $allQuestions
+                    ))),
+                ]
+            );
+
+            foreach ($aiQuestions as $question) {
                 $allQuestions[] = [
-                    'question_text' => $q['question_text'],
-                    'type' => $q['type'] ?? 'technical',
+                    'question_text' => $question['question_text'],
+                    'type' => $question['type'] ?? 'general',
                     'source' => 'system',
-                    'expected_skills' => $job->required_skills,
-                    'evaluation_criteria' => ['clarity', 'depth', 'relevance'],
+                    'expected_skills' => $question['expected_skills'] ?? $job->required_skills,
+                    'evaluation_criteria' => $question['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
+                    'time_allocation_seconds' => $question['time_allocation_seconds'] ?? 120,
                 ];
             }
         }
 
-        // Shuffle to mix AI and company questions
-        shuffle($allQuestions);
+        if ($job->question_order === 'random') {
+            shuffle($allQuestions);
+        }
 
-        return $allQuestions;
+        return array_slice($allQuestions, 0, $requiredCount);
     }
 
     /**
@@ -129,54 +156,16 @@ class QuestionBankService
      */
     private function generateAIQuestions(CompanyJob $job, LLMService $llmService): array
     {
-        $skillsList = implode(', ', $job->required_skills);
+        $count = max(1, (int) $job->ai_questions_count);
 
-        $prompt = <<<EOT
-Generate {$job->ai_questions_count} interview questions for a {$job->title} position.
-
-Required skills: {$skillsList}
-Difficulty level: {$job->difficulty}
-
-Format the response as a JSON object with a 'questions' array. Each question should have:
-- question_text: The actual question
-- type: One of ['technical', 'behavioral', 'situational']
-
-Return ONLY valid JSON.
-EOT;
-
-        try {
-            $response = $llmService->generateQuestionsFromPrompt($prompt, $job->ai_questions_count);
-            return $response['questions'] ?? [];
-        } catch (\Exception $e) {
-            return $this->getFallbackAIQuestions($job);
-        }
-    }
-
-    /**
-     * Fallback AI questions if generation fails
-     */
-    private function getFallbackAIQuestions(CompanyJob $job): array
-    {
-        $skills = $job->required_skills;
-        $skill = $skills[0] ?? 'software development';
-
-        $templates = [
-            "Tell me about your experience with {$skill}.",
-            "What's the most challenging project you've worked on?",
-            "How do you stay updated with latest technologies?",
-            "Describe your problem-solving approach.",
-            "How do you handle technical debt?",
-        ];
-
-        $questions = [];
-        for ($i = 0; $i < $job->ai_questions_count; $i++) {
-            $questions[] = [
-                'question_text' => $templates[$i % count($templates)],
-                'type' => $i % 2 == 0 ? 'technical' : 'behavioral',
-            ];
-        }
-
-        return $questions;
+        return $llmService->generateQuestionsForJob(
+            $job,
+            null,
+            $count,
+            [
+                'generation_scope' => 'legacy_company_question_bank_flow',
+            ]
+        );
     }
 
     /**

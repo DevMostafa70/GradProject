@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\BillingStatus;
 use App\Services\CompanyEmployeeAccessService;
+use App\Notifications\Auth\NervuPasswordResetNotification;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -492,4 +493,12 @@ class Company extends Authenticatable
             'billing_status' => BillingStatus::Cancelled,
         ]);
     }
+    public function sendPasswordResetNotification($token): void
+    {
+        $this->notify(new NervuPasswordResetNotification(
+            (string) $token,
+            NervuPasswordResetNotification::accountTypeFor($this),
+        ));
+    }
+
 }

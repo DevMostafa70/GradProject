@@ -4,6 +4,7 @@ namespace App\Services;
 
 use OpenAI\Laravel\Facades\OpenAI;
 use App\Models\Interview;
+use App\Models\CompanyJob;
 use App\Models\Question;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
@@ -11,37 +12,161 @@ use Illuminate\Support\Facades\Log;
 class LLMService
 {
     /**
-     * Generate interview questions based on position, skills, and experience
+     * Generate interview questions through the single canonical pipeline used
+     * by both normal-user interviews and company-candidate interviews.
      */
-    public function generateQuestions(Interview $interview)
-    {
-        $prompt = $this->buildQuestionGenerationPrompt($interview);
+    public function generateQuestions(
+        Interview $interview,
+        ?int $questionCount = null,
+        array $context = []
+    ): array {
+        $expectedCount = max(
+            1,
+            (int) ($questionCount ?? $interview->number_of_questions ?? 5)
+        );
 
-        try {
-            $response = OpenAI::chat()->create([
-                'model' => 'gpt-4o-mini',
-                'messages' => [
-                    [
-                        'role' => 'system',
-                        'content' => 'You are an expert technical interviewer. Generate relevant interview questions with evaluation criteria.'
+        $prompt = $this->buildQuestionGenerationPrompt(
+            $interview,
+            $expectedCount,
+            $context
+        );
+
+        $maxAttempts = 3;
+        $lastException = null;
+
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            try {
+                $attemptNonce = (string) \Illuminate\Support\Str::uuid();
+                $attemptPrompt = $prompt . "\n\nGENERATION ATTEMPT: {$attempt}/{$maxAttempts}\n"
+                    . "ATTEMPT NONCE: {$attemptNonce}\n"
+                    . "Return a fresh interview composition for this attempt. "
+                    . "Do not expose the nonce in any question or user-facing field.";
+
+                Log::info('Generating interview questions through unified pipeline', [
+                    'interview_id' => $interview->id,
+                    'interview_type' => $interview->interview_type,
+                    'company_job_id' => $interview->company_job_id,
+                    'position' => $interview->position,
+                    'expected_count' => $expectedCount,
+                    'attempt' => $attempt,
+                    'generation_scope' => $context['generation_scope'] ?? 'standard_interview',
+                ]);
+
+                $response = OpenAI::chat()->create([
+                    'model' => 'gpt-4o-mini',
+                    'messages' => [
+                        [
+                            'role' => 'system',
+                            'content' => implode("\n", [
+                                'You are a senior structured-interview assessment designer.',
+                                'Generate practical, job-related, fair, varied, and consistently scorable interview questions.',
+                                'Use the same quality standard for individual and company interviews.',
+                                'Historical and excluded questions are a strict semantic exclusion list.',
+                                'Avoid generic textbook questions and superficial paraphrases.',
+                                'Return one valid JSON object only.',
+                            ]),
+                        ],
+                        [
+                            'role' => 'user',
+                            'content' => $attemptPrompt,
+                        ],
                     ],
-                    [
-                        'role' => 'user',
-                        'content' => $prompt
-                    ]
-                ],
-                'temperature' => 0.7,
-                'response_format' => ['type' => 'json_object'],
-            ]);
+                    'temperature' => 0.85,
+                    'presence_penalty' => 0.45,
+                    'frequency_penalty' => 0.25,
+                    'response_format' => ['type' => 'json_object'],
+                    'max_tokens' => 6000,
+                ]);
 
-            $content = $response->choices[0]->message->content;
-            $questions = json_decode($content, true);
-            return $this->validateAndFormatQuestions($questions, $interview);
-        } catch (\Exception $e) {
-            logger($e->getMessage());
-            // Fallback questions if AI fails
-            return $this->getFallbackQuestions($interview);
+                $choice = $response->choices[0] ?? null;
+
+                if (!$choice) {
+                    throw new \UnexpectedValueException('OpenAI returned no completion choice.');
+                }
+
+                $finishReason = $choice->finishReason
+                    ?? $choice->finish_reason
+                    ?? null;
+
+                if ($finishReason === 'length') {
+                    throw new \UnexpectedValueException('Question generation response was truncated.');
+                }
+
+                $content = trim((string) ($choice->message->content ?? ''));
+
+                if ($content === '') {
+                    throw new \UnexpectedValueException('OpenAI returned an empty response.');
+                }
+
+                try {
+                    $questionsData = json_decode(
+                        $content,
+                        true,
+                        512,
+                        JSON_THROW_ON_ERROR
+                    );
+                } catch (\JsonException $exception) {
+                    throw new \UnexpectedValueException(
+                        'OpenAI returned invalid JSON: ' . $exception->getMessage(),
+                        previous: $exception
+                    );
+                }
+
+                $formatted = $this->validateAndFormatQuestions(
+                    $questionsData,
+                    $interview,
+                    $expectedCount
+                );
+
+                if (count($formatted) !== $expectedCount) {
+                    throw new \UnexpectedValueException(sprintf(
+                        'Expected %d formatted questions, received %d.',
+                        $expectedCount,
+                        count($formatted)
+                    ));
+                }
+
+                Log::info('Interview questions generated successfully', [
+                    'interview_id' => $interview->id,
+                    'interview_type' => $interview->interview_type,
+                    'questions_count' => count($formatted),
+                    'attempt' => $attempt,
+                    'finish_reason' => $finishReason,
+                ]);
+
+                return $formatted;
+            } catch (\Throwable $exception) {
+                $lastException = $exception;
+
+                Log::warning('Unified question generation attempt failed', [
+                    'interview_id' => $interview->id,
+                    'interview_type' => $interview->interview_type,
+                    'position' => $interview->position,
+                    'attempt' => $attempt,
+                    'max_attempts' => $maxAttempts,
+                    'error' => $exception->getMessage(),
+                    'exception' => get_class($exception),
+                ]);
+
+                if ($attempt < $maxAttempts) {
+                    usleep(500000);
+                }
+            }
         }
+
+        Log::error('All unified question generation attempts failed', [
+            'interview_id' => $interview->id,
+            'interview_type' => $interview->interview_type,
+            'position' => $interview->position,
+            'expected_count' => $expectedCount,
+            'error' => $lastException?->getMessage(),
+        ]);
+
+        return $this->getFallbackQuestions(
+            $interview,
+            $expectedCount,
+            $context
+        );
     }
 
 
@@ -298,119 +423,71 @@ EOT;
 
 
     /**
-     * Generate questions for a specific job (for company candidates)
+     * Generate the AI portion of a company interview through the exact same
+     * pipeline, prompt, validation, retries, timing, and fallback used by a
+     * normal-user interview.
      */
-    public function generateQuestionsForJob($job, $interview): array
-    {
-        $skillsList = implode(', ', $job->required_skills);
-        $locale = $this->normalizeLocale($interview->locale ?? null);
-        $language = $this->languageName($locale);
+    public function generateQuestionsForJob(
+        CompanyJob $job,
+        ?Interview $interview = null,
+        ?int $questionCount = null,
+        array $context = []
+    ): array {
+        $locale = $interview?->normalizedLocale()
+            ?? $job->normalizedInterviewLocale();
 
-        $prompt = <<<EOT
-Generate {$job->number_of_questions} interview questions for a {$job->title} position.
+        $count = max(
+            1,
+            (int) ($questionCount
+                ?? $interview?->number_of_questions
+                ?? $job->number_of_questions
+                ?? 5)
+        );
 
-Required skills: {$skillsList}
-Difficulty level: {$job->difficulty}
-Question language: {$language}
+        // Work on a clone so generation overrides never persist accidental
+        // changes to an already-created company interview.
+        $generationInterview = $interview
+            ? clone $interview
+            : new Interview();
 
-Write every user-facing text value in {$language}. Keep JSON keys and enum values in English.
+        $generationInterview->forceFill([
+            'interview_type' => $interview?->interview_type ?: 'company_candidate',
+            'company_job_id' => $interview?->company_job_id ?: $job->id,
+            'candidate_id' => $interview?->candidate_id,
+            'position' => $job->titleForLocale($locale),
+            'experience_level' => $interview?->experience_level ?: 'mid',
+            'difficulty' => (int) $job->difficulty,
+            'skills' => array_values($job->required_skills ?? []),
+            'number_of_questions' => $count,
+            'locale' => $locale,
+        ]);
 
-Format the response as a JSON object with a 'questions' array. Each question should have:
-- question_text: The actual question
-- type: One of ['technical', 'behavioral', 'situational']
-- expected_skills: Array of skills this question evaluates
-- evaluation_criteria: Array of key points to evaluate
+        $company = $job->relationLoaded('company')
+            ? $job->company
+            : $job->company()->first(['id', 'company_name', 'industry']);
 
-Return ONLY valid JSON.
-EOT;
+        $companyName = $company?->company_name;
 
-        try {
-            $response = OpenAI::chat()->create([
-                'model' => 'gpt-4o-mini',
-                'messages' => [
-                    [
-                        'role' => 'system',
-                        'content' => 'You are an expert technical interviewer. Generate relevant interview questions with evaluation criteria.'
-                    ],
-                    [
-                        'role' => 'user',
-                        'content' => $prompt
-                    ]
-                ],
-                'temperature' => 0.7,
-                'response_format' => ['type' => 'json_object'],
-            ]);
+        $companyContext = array_merge([
+            'generation_scope' => 'company_candidate_interview',
+            'company_job_id' => $job->id,
+            'company_name' => $companyName ?: 'Not provided',
+            'industry' => $company?->industry ?: 'Not provided',
+            'job_description' => $job->descriptionForLocale($locale),
+            'job_title' => $job->titleForLocale($locale),
+            'questions_source' => $job->questions_source,
+        ], $context);
 
-            $content = $response->choices[0]->message->content;
-            $questionsData = json_decode($content, true);
+        $questions = $this->generateQuestions(
+            $generationInterview,
+            $count,
+            $companyContext
+        );
 
-            return $this->formatQuestionsForJob($questionsData, $job, $locale);
-        } catch (\Exception $e) {
-            Log::error('generateQuestionsForJob failed: ' . $e->getMessage());
-            return $this->getFallbackQuestionsForJob($job, $locale);
-        }
-    }
-
-    /**
-     * Format questions for job
-     */
-    private function formatQuestionsForJob(array $data, $job, ?string $locale = null): array
-    {
-        $formatted = [];
-
-        if (!isset($data['questions']) || empty($data['questions'])) {
-            return $this->getFallbackQuestionsForJob($job, $locale);
-        }
-
-        foreach ($data['questions'] as $index => $question) {
-            $formatted[] = [
-                'question_text' => $question['question_text'] ?? $this->localizedText($this->normalizeLocale($locale), 'يرجى وصف خبرتك.', 'Please describe your experience.'),
-                'type' => $question['type'] ?? 'technical',
-                'expected_skills' => $question['expected_skills'] ?? $job->required_skills,
-                'evaluation_criteria' => $question['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
-                'order' => $index + 1,
-            ];
-        }
-
-        return $formatted;
-    }
-
-    /**
-     * Fallback questions for job
-     */
-    private function getFallbackQuestionsForJob($job, ?string $locale = null): array
-    {
-        $questions = [];
-        $locale = $this->normalizeLocale($locale);
-        $skill = $job->required_skills[0] ?? $this->localizedText($locale, 'تطوير البرمجيات', 'software development');
-
-        $templates = $locale === 'ar'
-            ? [
-                "حدثني عن خبرتك في {$skill}.",
-                "ما أصعب مشروع عملت عليه باستخدام {$skill}؟",
-                "كيف تتابع أحدث التطورات في {$skill}؟",
-                "صف موقفًا اضطررت فيه إلى تصحيح مشكلة معقدة.",
-                "كيف تتعامل مع تعلم تقنيات جديدة؟",
-            ]
-            : [
-                "Tell me about your experience with {$skill}.",
-                "What's the most challenging project you've worked on using {$skill}?",
-                "How do you stay updated with the latest developments in {$skill}?",
-                "Describe a time you had to debug a complex issue.",
-                "How do you approach learning new technologies?",
-            ];
-
-        for ($i = 0; $i < $job->number_of_questions; $i++) {
-            $questions[] = [
-                'question_text' => $templates[$i % count($templates)],
-                'type' => $i < 2 ? 'technical' : 'behavioral',
-                'expected_skills' => $job->required_skills,
-                'evaluation_criteria' => ['clarity', 'depth', 'relevance'],
-                'order' => $i + 1,
-            ];
-        }
-
-        return $questions;
+        return array_map(static function (array $question): array {
+            $question['source'] = 'system';
+            return $question;
+        }, $questions);
     }
 
     /**
@@ -620,371 +697,215 @@ EOT;
     }
 
     /**
-     * Build prompt for question generation
+     * Build the canonical question-generation prompt for every interview type.
      */
-    private function buildQuestionGenerationPrompt(Interview $interview): string
-    {
+    private function buildQuestionGenerationPrompt(
+        Interview $interview,
+        ?int $questionCount = null,
+        array $context = []
+    ): string {
+        $skills = collect($interview->skills ?? [])
+            ->filter(fn ($skill) => is_string($skill) && trim($skill) !== '')
+            ->map(fn ($skill) => trim($skill))
+            ->unique()
+            ->values();
 
-        $skillsList = implode(', ', $interview->skills);
+        $skillsList = $skills->isNotEmpty()
+            ? $skills->implode(', ')
+            : 'No specific skills provided';
+
         $locale = $this->normalizeLocale($interview->locale ?? null);
         $language = $this->languageName($locale);
+        $questionCount = max(1, (int) ($questionCount ?? $interview->number_of_questions ?? 5));
+        $targetDifficulty = max(1, min(10, (int) ($interview->difficulty ?? 5)));
+        $position = trim((string) ($interview->position ?: 'General Position'));
+        $experienceLevel = trim((string) ($interview->experience_level ?: 'mid'));
+
+        $jobDescription = trim((string) (
+            $context['job_description']
+            ?? data_get($interview->metadata, 'job_description')
+            ?? 'Not provided'
+        ));
+
+        $companyName = trim((string) ($context['company_name'] ?? 'Not applicable'));
+        $generationScope = trim((string) ($context['generation_scope'] ?? 'standard_interview'));
+
+        $historyQuery = Question::query()
+            ->with('interview:id,position')
+            ->whereHas('interview', function ($query) use ($interview, $position): void {
+                if ($interview->id) {
+                    $query->where('id', '!=', $interview->id);
+                }
+
+                $query->whereRaw('LOWER(position) = ?', [mb_strtolower($position)]);
+            })
+            ->latest('id')
+            ->limit(50)
+            ->get()
+            ->map(fn (Question $question): string => $question->textForLocale($locale))
+            ->filter()
+            ->values();
+
+        $excludedQuestions = collect($context['excluded_questions'] ?? [])
+            ->merge($historyQuery)
+            ->filter(fn ($question) => is_string($question) && trim($question) !== '')
+            ->map(fn ($question) => trim($question))
+            ->unique(fn ($question) => mb_strtolower($question))
+            ->take(80)
+            ->values();
+
+        $excludedQuestionsJson = $excludedQuestions->toJson(JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        $candidatePoolSize = max($questionCount * 3, $questionCount + 10);
 
         return <<<EOT
-You are a senior technical interviewer and HR expert with 15+ years of experience across multiple industries. You design real-world interview questions used in professional hiring processes.
+You are a senior structured-interview assessment designer, technical hiring manager, and HR expert.
 
-Your task is to generate high-quality, realistic, structured interview questions for a global AI-powered interview preparation platform.
+Create a realistic, job-related, fair, varied, and consistently scorable interview for a global AI-powered interview platform.
+
+The exact same professional quality standard applies whether this is an individual practice interview or a company-candidate interview.
 
 ---
 
-## INPUT PARAMETERS
+# INTERVIEW INPUT
 
-- Job Position: {$interview->position}
-- Experience Level: {$interview->experience_level}
+- Generation Scope: {$generationScope}
+- Job Position: {$position}
+- Company: {$companyName}
+- Experience Level: {$experienceLevel}
 - Required Skills: {$skillsList}
-- Difficulty Level (1-10): {$interview->difficulty}
-- Number of Questions: {$interview->number_of_questions}
+- Job Description: {$jobDescription}
+- Target Difficulty: {$targetDifficulty}/10
+- Number of Questions: {$questionCount}
 - Question Language: {$language}
 
 ---
 
-# CORE OBJECTIVE
+# HISTORICAL EXCLUSION LIST
 
-Generate exactly {$interview->number_of_questions} interview questions that simulate a real professional hiring interview.
+The following questions were previously used for the same or a similar position, or are already selected from a company question bank.
 
-The interview must evaluate:
-- Technical knowledge
-- Problem-solving ability
-- Communication skills
-- Decision-making
-- Real-world experience
-- Behavioral patterns
+Treat them as a semantic exclusion list. Do not repeat them, paraphrase them, reuse the same central scenario, or ask for substantially the same evidence through the same reasoning path.
 
-Questions must feel like they were created by a professional interviewer from a real company.
+{$excludedQuestionsJson}
 
 ---
 
-# QUESTION DISTRIBUTION RULES
+# INTERNAL SELECTION PROCESS
 
-Adapt distribution based on the role, but follow this default:
+Internally generate at least {$candidatePoolSize} candidate questions, score them for job relevance, realism, novelty, difficulty alignment, skill coverage, fairness, and scoreability, then return only the strongest {$questionCount} questions.
 
-- Technical / Functional: 40–50%
-- Behavioral: 25–30%
-- Situational: 15–20%
-- General / HR: 5–10%
+Do not expose the candidate pool or internal reasoning.
 
-For non-technical roles:
-Replace technical questions with role-specific functional questions.
+Reject questions that are generic, textbook-only, predictable, discriminatory, duplicated, or superficial paraphrases.
 
----
+Avoid standard forms such as:
 
-# DIFFICULTY RULES (STRICT)
+- Tell me about yourself.
+- What are your strengths or weaknesses?
+- Why should we hire you?
+- Where do you see yourself in five years?
+- Tell me about a challenging project.
+- How do you keep up with technology?
+- Explain or define a technology without a practical context.
 
-Difficulty scale: 1-10
-
-Must align with experience level:
-
-Entry:
-1–4
-
-Junior:
-3–6
-
-Mid-Level:
-5–7
-
-Senior:
-6–9
-
-Lead / Executive:
-7–10
-
-
-Rules:
-- Average difficulty must be close to the provided difficulty level (±1 allowed).
-- Include natural difficulty variation.
-- Avoid generating all questions with the same difficulty.
+A related competency may be assessed only through a specific job scenario with meaningful constraints, decisions, trade-offs, and observable evidence.
 
 ---
 
-# SKILLS COVERAGE RULE
+# QUESTION COMPOSITION
 
-- All required skills MUST appear at least once.
-- Critical skills should be evaluated multiple times using different question styles.
-- Avoid repeating the same skill in identical contexts.
-- Each question should include relevant skill_tags.
+Adapt the distribution to the role, using this default guidance:
 
----
+- Technical or role-functional: 35-50%
+- Behavioral evidence: 20-30%
+- Situational judgment: 20-30%
+- General job-related: 0-10%
 
-# QUESTION QUALITY REQUIREMENTS
+At least half of the questions must be practical, scenario-based, work-sample, debugging, decision, incident, prioritization, or trade-off questions.
 
-Questions MUST:
+Use diverse archetypes. Do not use the same archetype more than twice unless the interview has more than 10 questions.
 
-- Represent real company interview scenarios.
-- Avoid textbook-only questions.
-- Test practical knowledge and decision-making.
-- Be clear, concise, and professionally written.
-- Encourage detailed answers when required.
-- Avoid duplicate or very similar questions.
+Cover every required skill when mathematically possible. Critical skills may appear more than once only through different scenarios and evidence requirements.
+
+The average difficulty must remain within ±1 of {$targetDifficulty}, with natural variation across questions.
 
 ---
 
-# SAFETY & COMPLIANCE RULES (STRICT)
+# STRUCTURED EVALUATION
 
-DO NOT include:
+Every question must be consistently scorable and include:
 
-- Age-related questions
-- Gender-related questions
-- Religion
-- Nationality
-- Marital status
-- Disability
-- Pregnancy
-- Political views
-- Illegal or discriminatory topics
-- Personal questions unrelated to job performance
+- Clear evaluation criteria
+- Strong-answer indicators
+- A realistic answer timer
+- Skills genuinely assessed by the question
+- A real-world context
 
+Evaluate evidence, reasoning, correctness, prioritization, trade-offs, validation, ownership, and communication as relevant.
+
+Do not evaluate accent, appearance, personality style, or speaking speed alone.
 
 ---
 
-# INDUSTRY ADAPTATION RULES
+# ANSWER TIME ALLOCATION
 
-Technical roles:
-- Algorithms
-- Debugging
-- Architecture
-- System design
-- Performance optimization
+Use realistic time limits:
 
-Data roles:
-- SQL
-- Analytics
-- Statistics
-- Data interpretation
-- Experiment design
+- Simple job-related question: 45-90 seconds
+- Technical explanation: 90-180 seconds
+- Behavioral evidence: 120-240 seconds
+- Debugging or problem solving: 150-300 seconds
+- Situational decision: 150-300 seconds
+- Architecture or system design: 300-600 seconds
 
-Business roles:
-- Strategy
-- Leadership
-- Stakeholder management
-
-Creative roles:
-- Portfolio review
-- Ideation
-- Design decisions
-
-Sales roles:
-- Negotiation
-- Communication
-- Objection handling
-
-Executive roles:
-- Vision
-- Strategy
-- Crisis management
-
+Different questions should normally have different allocations. Complex questions must receive more time than simple questions.
 
 ---
 
-# EXPERIENCE LEVEL BEHAVIOR MODEL
+# FAIRNESS AND COMPLIANCE
 
-Entry:
-- Learning ability
-- Basic understanding
-- Following instructions
+Every question must relate directly to job performance.
 
-Junior:
-- Core skills
-- Team collaboration
-- Basic problem solving
+Do not ask about age, gender, religion, nationality, ethnicity, marital status, pregnancy, disability, medical history, political views, financial status, family status, or other protected or irrelevant personal information.
 
-Mid-Level:
-- Independent execution
-- Technical decisions
-- Ownership
-
-Senior:
-- Advanced expertise
-- Architecture decisions
-- Mentoring
-
-Lead:
-- Team impact
-- Technical leadership
-- Strategic thinking
-
-Executive:
-- Business strategy
-- Organization decisions
-
+Allow multiple professionally defensible answers when appropriate.
 
 ---
 
-# ANSWER TIME ALLOCATION ENGINE (VERY IMPORTANT)
+# LANGUAGE RULES
 
-For every question, calculate a realistic answer duration.
-
-The timer must simulate a real professional interview:
-
-- Give enough time for the candidate to provide a complete answer.
-- Create moderate pressure similar to real hiring interviews.
-- Do not make the timer too short.
-- Do not make the timer unnecessarily long.
-- The candidate should feel challenged but treated fairly.
-
-
-The value of `time_allocation_seconds` MUST depend on:
-
-## Question Type
-
-Simple introduction / basic knowledge:
-45–90 seconds
-
-Technical explanation:
-90–180 seconds
-
-Debugging / problem solving:
-150–300 seconds
-
-Behavioral questions using STAR method:
-120–240 seconds
-
-Situational decision-making:
-180–300 seconds
-
-System design / architecture:
-300–600 seconds
-
-
-## Difficulty Adjustment
-
-Difficulty 1-3:
-45–120 seconds
-
-Difficulty 4-6:
-90–180 seconds
-
-Difficulty 7-8:
-180–300 seconds
-
-Difficulty 9-10:
-300–600 seconds
-
-
-## Experience Level Adjustment
-
-Entry / Junior:
-- Give slightly more time.
-- Allow candidates to explain their reasoning.
-
-Mid-Level:
-- Balanced timing.
-- Expect confident structured answers.
-
-Senior / Lead:
-- Increase pressure.
-- Expect concise answers with clear decisions and trade-offs.
-
-
-## Timer Philosophy
-
-The timer should simulate a real interview:
-
-- Candidate should normally finish with around 10–20 seconds remaining.
-- Avoid giving unlimited thinking time.
-- Avoid forcing incomplete answers.
-- Complex questions must always receive more time than simple questions.
-- Different questions MUST have different time allocations.
-
-
-Examples:
-
-Question:
-"Explain React hooks and their common use cases."
-
-Expected:
-90–120 seconds
-
-
-Question:
-"How would you debug performance issues in a large React application?"
-
-Expected:
-180–240 seconds
-
-
-Question:
-"Design the architecture of a scalable e-commerce platform."
-
-Expected:
-420–600 seconds
-
-
-Question:
-"Describe a conflict with a teammate and how you solved it."
-
-Expected:
-150–240 seconds
-
-
----
-
-# LANGUAGE RULES (STRICT)
-
-Write these fields in {$language}:
-
-- question_text
-- category
-- evaluation_criteria
-- strong_answer_indicators
-- real_world_context
-
-
-Keep JSON keys and enum values in English:
-
-Examples:
-technical
-behavioral
-situational
-general
-
-
+Write all user-facing fields in {$language}.
+Keep JSON keys and enum values in English.
 Do not return bilingual objects.
+Keep common technical terms in their recognized professional form when appropriate.
 
 ---
 
-# OUTPUT FORMAT (STRICT JSON ONLY)
+# OUTPUT FORMAT
 
-Return ONLY a valid JSON object:
+Return ONLY one valid JSON object with exactly this structure:
 
 {
   "questions": [
     {
-      "id": "string",
+      "id": "stable-unique-string",
       "order": 1,
       "question_text": "string",
       "type": "technical | behavioral | situational | general",
       "category": "string",
       "difficulty_score": 1,
-      "expected_skills": [
-        "string"
-      ],
-      "evaluation_criteria": [
-        "string"
-      ],
-      "strong_answer_indicators": [
-        "string"
-      ],
+      "expected_skills": ["string"],
+      "evaluation_criteria": ["string"],
+      "strong_answer_indicators": ["string"],
       "time_allocation_seconds": 120,
-      "skill_tags": [
-        "string"
-      ],
+      "skill_tags": ["string"],
       "real_world_context": "string"
     }
   ],
   "metadata": {
-    "total_questions": {$interview->number_of_questions},
-    "position": "{$interview->position}",
-    "experience_level": "{$interview->experience_level}",
+    "total_questions": {$questionCount},
+    "position": "{$position}",
+    "experience_level": "{$experienceLevel}",
     "average_difficulty": 0,
     "question_type_distribution": {
       "technical": 0,
@@ -992,48 +913,28 @@ Return ONLY a valid JSON object:
       "situational": 0,
       "general": 0
     },
-    "skills_covered": [
-      "string"
-    ],
-    "generation_timestamp": "ISO-8601"
+    "skills_covered": ["string"]
   }
 }
 
-
 ---
 
-# FINAL VALIDATION (MANDATORY)
+# FINAL VALIDATION
 
-Before returning the JSON:
+Before returning JSON, verify:
 
-✔ Generate exactly {$interview->number_of_questions} questions
+- Exactly {$questionCount} questions exist.
+- Every required field exists.
+- No duplicate or semantically repetitive questions exist.
+- No question overlaps with the historical exclusion list.
+- Required skills are covered when possible.
+- Types, scenarios, and difficulty are varied.
+- Timers are realistic and between 45 and 600 seconds.
+- All questions are job-related, fair, and consistently scorable.
+- All user-facing text is written in {$language}.
+- There is no markdown or text outside the JSON.
 
-✔ Every required field exists
-
-✔ JSON is valid and parseable
-
-✔ No markdown or explanation outside JSON
-
-✔ All required skills are covered
-
-✔ Difficulty matches experience level
-
-✔ No duplicate questions
-
-✔ Question types are balanced
-
-✔ Every question has a realistic time_allocation_seconds value
-
-✔ Time allocation varies between questions
-
-✔ Difficult questions receive more time than simple questions
-
-✔ Timer creates realistic interview pressure without being unfair
-
-
----
-
-Now generate the interview questions.
+If validation fails, silently repair the set before returning it.
 EOT;
     }
 
@@ -1293,34 +1194,85 @@ EOT;
 
 
     /**
-     * Validate and format AI-generated questions
+     * Validate and format AI-generated questions for every interview type.
      */
-    private function validateAndFormatQuestions(array $data, Interview $interview): array
-    {
-        if (!isset($data['questions']) || count($data['questions']) !== (int) $interview->number_of_questions) {
-            return $this->getFallbackQuestions($interview);
+    private function validateAndFormatQuestions(
+        array $data,
+        Interview $interview,
+        ?int $expectedCount = null
+    ): array {
+        $expectedCount = max(
+            1,
+            (int) ($expectedCount ?? $interview->number_of_questions ?? 5)
+        );
+
+        if (
+            !isset($data['questions'])
+            || !is_array($data['questions'])
+            || count($data['questions']) !== $expectedCount
+        ) {
+            throw new \UnexpectedValueException(sprintf(
+                'Expected exactly %d generated questions.',
+                $expectedCount
+            ));
         }
 
+        $locale = $this->normalizeLocale($interview->locale ?? null);
+        $allowedTypes = ['technical', 'behavioral', 'situational', 'general'];
         $formatted = [];
+        $normalizedTexts = [];
+
         foreach ($data['questions'] as $index => $question) {
+            if (!is_array($question)) {
+                throw new \UnexpectedValueException('A generated question is not an object.');
+            }
+
             $questionText = $question['question_text'] ?? null;
 
             if (is_array($questionText)) {
-                $locale = $this->normalizeLocale($interview->locale ?? null);
-                $questionText = $questionText[$locale] ?? $questionText['en'] ?? $questionText['ar'] ?? reset($questionText);
+                $questionText = $questionText[$locale]
+                    ?? $questionText['en']
+                    ?? $questionText['ar']
+                    ?? reset($questionText);
             }
 
-            if (!is_string($questionText) || trim($questionText) === '') {
-                return $this->getFallbackQuestions($interview);
+            if (!is_string($questionText) || mb_strlen(trim($questionText)) < 15) {
+                throw new \UnexpectedValueException(sprintf(
+                    'Generated question %d has invalid question_text.',
+                    $index + 1
+                ));
             }
+
+            $questionText = trim($questionText);
+            $normalized = $this->normalizeQuestionText($questionText);
+
+            if (in_array($normalized, $normalizedTexts, true)) {
+                throw new \UnexpectedValueException('Generated questions contain an exact duplicate.');
+            }
+
+            foreach ($normalizedTexts as $previousText) {
+                if ($this->questionTextSimilarity($normalized, $previousText) >= 0.72) {
+                    throw new \UnexpectedValueException('Generated questions contain highly similar items.');
+                }
+            }
+
+            $normalizedTexts[] = $normalized;
+            $type = strtolower(trim((string) ($question['type'] ?? 'general')));
+            $timeAllocation = (int) ($question['time_allocation_seconds'] ?? 120);
 
             $formatted[] = [
-                'question_text' => trim($questionText),
-                'type' => in_array($question['type'] ?? '', ['technical', 'behavioral', 'situational', 'general'])
-                    ? $question['type']
-                    : 'general',
-                'expected_skills' => $question['expected_skills'] ?? [],
-                'evaluation_criteria' => $question['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
+                'question_text' => $questionText,
+                'type' => in_array($type, $allowedTypes, true) ? $type : 'general',
+                'expected_skills' => array_values(array_filter(
+                    is_array($question['expected_skills'] ?? null)
+                        ? $question['expected_skills']
+                        : ($interview->skills ?? [])
+                )),
+                'evaluation_criteria' => is_array($question['evaluation_criteria'] ?? null)
+                    && !empty($question['evaluation_criteria'])
+                        ? $question['evaluation_criteria']
+                        : ['clarity', 'depth', 'relevance'],
+                'time_allocation_seconds' => max(45, min(600, $timeAllocation)),
                 'order' => $index + 1,
             ];
         }
@@ -1360,41 +1312,112 @@ EOT;
     }
 
     /**
-     * Fallback questions if AI fails
+     * Deterministic fallback shared by normal and company AI interviews.
      */
-    private function getFallbackQuestions(Interview $interview): array
-    {
-        $questions = [];
+    private function getFallbackQuestions(
+        Interview $interview,
+        ?int $questionCount = null,
+        array $context = []
+    ): array {
+        $count = max(
+            1,
+            (int) ($questionCount ?? $interview->number_of_questions ?? 5)
+        );
         $locale = $this->normalizeLocale($interview->locale ?? null);
-        $skill = $interview->skills[0] ?? $this->localizedText($locale, 'تطوير البرمجيات', 'software development');
+        $skills = collect($interview->skills ?? [])
+            ->filter(fn ($skill) => is_string($skill) && trim($skill) !== '')
+            ->map(fn ($skill) => trim($skill))
+            ->values();
+
+        if ($skills->isEmpty()) {
+            $skills = collect([
+                $this->localizedText($locale, 'المهارات الوظيفية', 'role-specific skills'),
+            ]);
+        }
+
+        $position = trim((string) ($interview->position ?: $this->localizedText(
+            $locale,
+            'هذه الوظيفة',
+            'this role'
+        )));
 
         $templates = $locale === 'ar'
             ? [
-                "حدثني عن خبرتك في {$skill}.",
-                "ما أصعب مشروع عملت عليه في {$skill}؟",
-                "كيف تتابع أحدث التطورات في {$skill}؟",
-                "صف موقفًا اضطررت فيه إلى تعلم تقنية جديدة بسرعة.",
-                "كيف تتعامل مع حل المشكلات في {$skill}؟",
+                fn ($skill) => "واجه فريقك مشكلة تؤثر في استخدام {$skill}. كيف ستحدد السبب، وترتب خطوات المعالجة، وتتحقق من نجاح الحل؟",
+                fn ($skill) => "لديك متطلبات غير مكتملة لمهمة تعتمد على {$skill} وموعد تسليم قريب. ما الأسئلة التي ستطرحها، وكيف ستحدد نطاق العمل؟",
+                fn ($skill) => "اشرح قرارًا عمليًا اتخذته عند استخدام {$skill}، وما البدائل التي قارنتها، وكيف قست النتيجة.",
+                fn ($skill) => "اكتشفت بعد الإطلاق أن حلًا مبنيًا على {$skill} يسبب مشكلة في الأداء أو الجودة. كيف ستتعامل مع الحادث وتمنع تكراره؟",
+                fn ($skill) => "كيف ستشرح مخاطرة أو قرارًا متعلقًا بـ{$skill} لشخص غير تقني يحتاج إلى اتخاذ قرار؟",
+                fn ($skill) => "لديك خياران صالحان لتنفيذ جزء مهم باستخدام {$skill}. كيف ستقارن بينهما من حيث الوقت والمخاطر وقابلية الصيانة؟",
+                fn ($skill) => "صف موقفًا تحملت فيه مسؤولية نتيجة لم تسر كما خُطط لها في عمل مرتبط بـ{$skill}. ماذا فعلت وماذا تعلمت؟",
+                fn ($skill) => "طُلب منك تحسين جزء قائم يعتمد على {$skill} دون إيقاف الخدمة. كيف ستخطط للتغيير وتختبره تدريجيًا؟",
             ]
             : [
-                "Tell me about your experience with {$skill}.",
-                "What's the most challenging {$skill} project you've worked on?",
-                "How do you stay updated with the latest developments in {$skill}?",
-                "Describe a time you had to learn a new technology quickly.",
-                "How do you approach problem-solving in {$skill}?",
+                fn ($skill) => "Your team faces a problem affecting the use of {$skill}. How would you isolate the cause, prioritize the response, and verify the fix?",
+                fn ($skill) => "You have incomplete requirements for a task involving {$skill} and a near deadline. What would you clarify, and how would you define the scope?",
+                fn ($skill) => "Explain a practical decision you made while using {$skill}, the alternatives you considered, and how you measured the result.",
+                fn ($skill) => "After release, a solution built with {$skill} causes a performance or quality issue. How would you handle the incident and prevent recurrence?",
+                fn ($skill) => "How would you explain a risk or decision involving {$skill} to a non-technical stakeholder who must make a decision?",
+                fn ($skill) => "You have two viable approaches for an important task using {$skill}. How would you compare delivery time, risk, and maintainability?",
+                fn ($skill) => "Describe a situation where you owned an outcome that did not go as planned in work involving {$skill}. What did you do and learn?",
+                fn ($skill) => "You must improve an existing component that relies on {$skill} without interrupting service. How would you plan and validate the change incrementally?",
             ];
 
-        foreach (array_slice($templates, 0, $interview->number_of_questions) as $index => $template) {
+        $types = [
+            'situational',
+            'situational',
+            'technical',
+            'technical',
+            'behavioral',
+            'situational',
+            'behavioral',
+            'technical',
+        ];
+        $times = [180, 180, 150, 240, 120, 210, 180, 240];
+        $questions = [];
+
+        for ($index = 0; $index < $count; $index++) {
+            $skill = $skills[$index % $skills->count()];
+            $templateIndex = $index % count($templates);
+
             $questions[] = [
-                'question_text' => $template,
-                'type' => $index < 2 ? 'technical' : 'behavioral',
+                'question_text' => $templates[$templateIndex]($skill),
+                'type' => $types[$templateIndex],
                 'expected_skills' => [$skill],
-                'evaluation_criteria' => ['clarity', 'depth', 'relevance', 'confidence'],
+                'evaluation_criteria' => ['clarity', 'depth', 'relevance', 'decision_quality'],
+                'time_allocation_seconds' => $times[$templateIndex],
                 'order' => $index + 1,
             ];
         }
 
         return $questions;
+    }
+
+    private function normalizeQuestionText(string $text): string
+    {
+        $text = mb_strtolower(trim($text));
+        $text = preg_replace('/[^\\p{L}\\p{N}\\s]+/u', ' ', $text) ?? $text;
+        $text = preg_replace('/\\s+/u', ' ', $text) ?? $text;
+
+        return trim($text);
+    }
+
+    private function questionTextSimilarity(string $first, string $second): float
+    {
+        $firstWords = array_values(array_unique(array_filter(
+            preg_split('/\\s+/u', $first) ?: []
+        )));
+        $secondWords = array_values(array_unique(array_filter(
+            preg_split('/\\s+/u', $second) ?: []
+        )));
+
+        $union = array_unique(array_merge($firstWords, $secondWords));
+
+        if (count($union) === 0) {
+            return 0.0;
+        }
+
+        return count(array_intersect($firstWords, $secondWords)) / count($union);
     }
 
     /**

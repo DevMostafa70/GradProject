@@ -187,14 +187,19 @@ class PublicInterviewController extends Controller
         $job = $candidate->job;
 
         // إنشاء مقابلة جديدة
+        $locale = $job->normalizedInterviewLocale();
+
         $interview = Interview::create([
             'candidate_id' => $candidate->id,
-            'position' => $job->title,
+            'company_job_id' => $job->id,
+            'interview_type' => 'company_candidate',
+            'position' => $job->titleForLocale($locale),
             'experience_level' => 'mid',
             'difficulty' => $job->difficulty,
+            'locale' => $locale,
             'skills' => $job->required_skills,
-            'number_of_questions' => $job->number_of_questions,
-            'status' => 'pending',
+            'number_of_questions' => $job->getTotalQuestionsPerCandidate(),
+            'status' => Interview::STATUS_PENDING,
             'session_token' => Str::random(64),
         ]);
 
@@ -204,12 +209,17 @@ class PublicInterviewController extends Controller
         foreach ($questionsData as $index => $q) {
             Question::create([
                 'interview_id' => $interview->id,
-                'question_text' => $q['question_text'],
-                'type' => $q['type'] ?? 'technical',
+                'question_text' => Question::localized(
+                    $q['question_text'] ?? '',
+                    $interview->locale
+                ),
+                'type' => $q['type'] ?? 'general',
                 'expected_skills' => $q['expected_skills'] ?? $job->required_skills,
+                'evaluation_criteria' => $q['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
+                'time_allocation_seconds' => max(45, min(600, (int) ($q['time_allocation_seconds'] ?? 120))),
                 'order' => $index + 1,
                 'source' => $q['source'] ?? 'system',
-                'status' => 'pending',
+                'status' => Question::STATUS_PENDING,
             ]);
         }
 
@@ -513,33 +523,47 @@ class PublicInterviewController extends Controller
     private function generateQuestionsBySource($job, $interview): array
     {
         $sourceType = $job->questions_source ?? 'mixed';
-        $allQuestions = [];
+        $requiredCount = max(1, (int) $interview->number_of_questions);
 
-        switch ($sourceType) {
-            case 'ai_only':
-                // ✅ فقط أسئلة من الذكاء الاصطناعي
-                $allQuestions = $this->llmService->generateQuestionsForJob($job, $interview);
-                // إضافة مصدر system لكل سؤال
-                foreach ($allQuestions as &$q) {
-                    $q['source'] = 'system';
-                }
-                break;
-
-            case 'company_only':
-                // ✅ فقط أسئلة من بنك الشركة
-                $allQuestions = $this->getCompanyQuestions($job);
-                break;
-
-            case 'mixed':
-            default:
-                // ✅ مزيج من الذكاء الاصطناعي + بنك الشركة
-                $aiQuestions = $this->llmService->generateQuestionsForJob($job, $interview);
-                $companyQuestions = $this->getCompanyQuestions($job);
-                $allQuestions = $this->interleaveQuestions($aiQuestions, $companyQuestions, $job);
-                break;
+        if ($sourceType === 'ai_only') {
+            return $this->llmService->generateQuestionsForJob(
+                $job,
+                $interview,
+                $requiredCount,
+                ['generation_scope' => 'legacy_public_company_interview']
+            );
         }
 
-        return $allQuestions;
+        if ($sourceType === 'company_only') {
+            return array_slice($this->getCompanyQuestions($job), 0, $requiredCount);
+        }
+
+        $companyQuestions = $this->getCompanyQuestions($job);
+        $companyCount = min(
+            max(0, (int) $job->company_questions_count),
+            $requiredCount
+        );
+        $companyQuestions = array_slice($companyQuestions, 0, $companyCount);
+
+        $aiCount = max(0, $requiredCount - count($companyQuestions));
+        $excludedQuestions = array_values(array_filter(array_map(
+            fn (array $question): string => trim((string) ($question['question_text'] ?? '')),
+            $companyQuestions
+        )));
+
+        $aiQuestions = $aiCount > 0
+            ? $this->llmService->generateQuestionsForJob(
+                $job,
+                $interview,
+                $aiCount,
+                [
+                    'generation_scope' => 'legacy_public_company_interview',
+                    'excluded_questions' => $excludedQuestions,
+                ]
+            )
+            : [];
+
+        return $this->interleaveQuestions($aiQuestions, $companyQuestions, $job);
     }
 
     /**
@@ -580,33 +604,18 @@ class PublicInterviewController extends Controller
     private function interleaveQuestions(array $aiQuestions, array $companyQuestions, $job): array
     {
         $result = [];
-        $totalQuestions = $job->number_of_questions ?? 5;
+        $totalQuestions = max(1, $job->getTotalQuestionsPerCandidate());
+        $maximum = max(count($aiQuestions), count($companyQuestions));
 
-        // تحديد عدد الأسئلة من كل مصدر
-        $aiCount = $job->ai_questions_count ?? 3;
-        $companyCount = $job->company_questions_count ?? 2;
-
-        // أخذ العدد المطلوب من كل مصدر
-        $aiSelected = array_slice($aiQuestions, 0, $aiCount);
-        $companySelected = array_slice($companyQuestions, 0, $companyCount);
-
-        // إضافة مصدر لكل سؤال
-        foreach ($aiSelected as &$q) {
-            $q['source'] = 'system';
-        }
-        foreach ($companySelected as &$q) {
-            $q['source'] = 'company';
-        }
-
-        // دمج بالتناوب
-        $maxCount = max(count($aiSelected), count($companySelected));
-
-        for ($i = 0; $i < $maxCount && count($result) < $totalQuestions; $i++) {
-            if ($i < count($aiSelected) && count($result) < $totalQuestions) {
-                $result[] = $aiSelected[$i];
+        for ($index = 0; $index < $maximum && count($result) < $totalQuestions; $index++) {
+            if (isset($aiQuestions[$index]) && count($result) < $totalQuestions) {
+                $aiQuestions[$index]['source'] = 'system';
+                $result[] = $aiQuestions[$index];
             }
-            if ($i < count($companySelected) && count($result) < $totalQuestions) {
-                $result[] = $companySelected[$i];
+
+            if (isset($companyQuestions[$index]) && count($result) < $totalQuestions) {
+                $companyQuestions[$index]['source'] = 'company';
+                $result[] = $companyQuestions[$index];
             }
         }
 

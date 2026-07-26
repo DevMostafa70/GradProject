@@ -143,12 +143,17 @@ class CompanyJobService
             $questionBankService = new QuestionBankService();
             $allQuestions = $questionBankService->generateInterviewQuestions($job, $candidate->id, $this->llmService);
 
-            // Create interview
+            // Create interview using the same canonical fields as the
+            // public company-candidate flow.
+            $locale = $job->normalizedInterviewLocale();
             $interview = Interview::create([
                 'user_id' => $candidate->id,
-                'position' => $job->translate('title'),
+                'company_job_id' => $job->id,
+                'company_job_candidate_id' => $jobCandidate->id,
+                'interview_type' => 'company_candidate',
+                'position' => $job->titleForLocale($locale),
                 'experience_level' => 'mid',
-                'locale' => app()->getLocale(),
+                'locale' => $locale,
                 'difficulty' => $job->difficulty,
                 'skills' => $job->required_skills,
                 'number_of_questions' => count($allQuestions),
@@ -165,6 +170,7 @@ class CompanyJobService
                     'type' => $questionData['type'] ?? 'technical',
                     'expected_skills' => $questionData['expected_skills'] ?? [],
                     'evaluation_criteria' => $questionData['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
+                    'time_allocation_seconds' => max(45, min(600, (int) ($questionData['time_allocation_seconds'] ?? 120))),
                     'source' => $questionData['source'],
                     'order' => $index + 1,
                     'status' => Question::STATUS_PENDING,
@@ -337,70 +343,18 @@ class CompanyJobService
      */
     private function generateSystemQuestions(CompanyJob $job): array
     {
-        $skillsList = implode(', ', $job->required_skills);
+        $count = $job->questions_source === 'mixed'
+            ? max(1, (int) $job->ai_questions_count)
+            : max(1, (int) $job->number_of_questions);
 
-        $prompt = <<<EOT
-Generate {$job->number_of_questions} interview questions for a {$job->title} position.
-
-Required skills: {$skillsList}
-Difficulty level: {$job->difficulty}
-
-Format the response as a JSON object with a 'questions' array. Each question should have:
-- question_text: The actual question
-- type: One of ['technical', 'behavioral', 'situational']
-- expected_skills: Array of skills this question evaluates
-- evaluation_criteria: Array of key points to evaluate
-
-Return ONLY valid JSON.
-EOT;
-
-        try {
-            $response = $this->llmService->generateQuestionsFromPrompt($prompt, $job->number_of_questions);
-            $questions = [];
-
-            foreach (($response['questions'] ?? []) as $q) {
-                $questions[] = [
-                    'question_text' => $q['question_text'] ?? '',
-                    'type' => $q['type'] ?? 'technical',
-                    'expected_skills' => $q['expected_skills'] ?? $job->required_skills,
-                    'evaluation_criteria' => $q['evaluation_criteria'] ?? ['clarity', 'depth', 'relevance'],
-                ];
-            }
-
-            return $questions;
-        } catch (\Exception $e) {
-            return $this->getFallbackSystemQuestions($job);
-        }
-    }
-
-    /**
-     * Fallback system questions if AI fails
-     * أسئلة احتياطية للنظام في حال فشل الذكاء الاصطناعي
-     */
-    private function getFallbackSystemQuestions(CompanyJob $job): array
-    {
-        $skills = $job->required_skills;
-        $skill = $skills[0] ?? 'software development';
-
-        $templates = [
-            "Tell me about your experience with {$skill}.",
-            "What's the most challenging project you've worked on using {$skill}?",
-            "How do you stay updated with the latest developments in {$skill}?",
-            "Describe a time you had to debug a complex issue.",
-            "How do you approach learning new technologies?",
-        ];
-
-        $questions = [];
-        for ($i = 0; $i < min($job->number_of_questions, count($templates)); $i++) {
-            $questions[] = [
-                'question_text' => $templates[$i],
-                'type' => $i < 3 ? 'technical' : 'behavioral',
-                'expected_skills' => $skills,
-                'evaluation_criteria' => ['clarity', 'depth', 'relevance'],
-            ];
-        }
-
-        return $questions;
+        return $this->llmService->generateQuestionsForJob(
+            $job,
+            null,
+            $count,
+            [
+                'generation_scope' => 'legacy_company_job_service_flow',
+            ]
+        );
     }
 
     /**

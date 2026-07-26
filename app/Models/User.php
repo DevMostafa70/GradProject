@@ -8,6 +8,7 @@ use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 use Spatie\Permission\Traits\HasRoles;
 use App\Services\CompanyEmployeeAccessService;
+use App\Notifications\Auth\NervuPasswordResetNotification;
 
 class User extends Authenticatable
 {
@@ -177,4 +178,12 @@ class User extends Authenticatable
     {
         return $this->hasMany(AdminLog::class, 'admin_id');
     }
+    public function sendPasswordResetNotification($token): void
+    {
+        $this->notify(new NervuPasswordResetNotification(
+            (string) $token,
+            NervuPasswordResetNotification::accountTypeFor($this),
+        ));
+    }
+
 }

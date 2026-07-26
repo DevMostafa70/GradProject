@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Support\AdminPermissionCatalog;
+use App\Notifications\Auth\NervuPasswordResetNotification;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Foundation\Auth\User as Authenticatable;
@@ -97,4 +98,12 @@ class Admin extends Authenticatable
     {
         return AdminPermissionCatalog::all();
     }
+    public function sendPasswordResetNotification($token): void
+    {
+        $this->notify(new NervuPasswordResetNotification(
+            (string) $token,
+            NervuPasswordResetNotification::accountTypeFor($this),
+        ));
+    }
+
 }

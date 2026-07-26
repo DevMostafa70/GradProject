@@ -90,25 +90,25 @@ return [
     'passwords' => [
         'candidates' => [
             'provider' => 'candidates',
-            'table' => 'password_reset_tokens',
+            'table' => 'password_reset_tokens_users',
             'expire' => 60,
             'throttle' => 60,
         ],
         'companies' => [
             'provider' => 'companies',
-            'table' => 'password_reset_tokens',
+            'table' => 'password_reset_tokens_companies',
             'expire' => 60,
             'throttle' => 60,
         ],
         'admins' => [
             'provider' => 'admins',
-            'table' => 'password_reset_tokens',
+            'table' => 'password_reset_tokens_admins',
             'expire' => 60,
             'throttle' => 60,
         ],
         'users' => [
             'provider' => 'users',
-            'table' => 'password_reset_tokens',
+            'table' => 'password_reset_tokens_users',
             'expire' => 60,
             'throttle' => 60,
         ],

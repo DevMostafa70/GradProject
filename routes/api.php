@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\API\Admin\AdminActivityLogController;
 use App\Http\Controllers\API\UserAuthController;
+use App\Http\Controllers\API\Auth\PasswordResetController;
 use App\Http\Controllers\API\Candidate\CandidateAuthController;
 use App\Http\Controllers\API\CompanyAuthController;
 use App\Http\Controllers\API\Admin\AdminAuthController;
@@ -48,7 +49,14 @@ use App\Http\Controllers\API\Webhook\StripeWebhookController;
 Route::prefix('user')->group(function () {
     Route::post('/register', [UserAuthController::class, 'register'])->middleware('throttle:5,1');
     Route::post('/login', [UserAuthController::class, 'login'])->middleware('throttle:auth');
+    Route::post('/forgot-password', [PasswordResetController::class, 'forgotUser'])
+        ->middleware('throttle:password-reset-request');
 });
+
+// One reset endpoint for every supported account type. Forgot-password is
+// intentionally exposed only under /user for regular users.
+Route::post('/password/reset', [PasswordResetController::class, 'reset'])
+    ->middleware('throttle:password-reset');
 
 // ===== Candidate Auth (Public - للتسجيل فقط) =====
 Route::prefix('candidate')->group(function () {
