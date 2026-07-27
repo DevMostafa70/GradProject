@@ -6,23 +6,30 @@ namespace App\Http\Controllers\Api\Company\Billing;
 
 use App\Http\Controllers\Controller;
 use App\Models\Company;
+use App\Services\Billing\CompanySubscriptionAccessService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Throwable;
 
 final class BillingStatusController extends Controller
 {
-    public function show(Request $request): JsonResponse
-    {
+    public function show(
+        Request $request,
+        CompanySubscriptionAccessService $accessService
+    ): JsonResponse {
         /** @var Company $company */
         $company = $request->user();
+        $company->loadMissing('selectedPlan');
 
         $plan = $company->selectedPlan;
+        $access = $accessService->snapshot($company, true);
 
-        // جلب معلومات الاشتراك من Stripe إذا كان موجوداً
         $subscription = null;
+
         if ($company->stripe_id) {
             try {
                 $stripeSubscription = $company->subscription('default');
+
                 if ($stripeSubscription) {
                     $subscription = [
                         'status' => $stripeSubscription->stripe_status,
@@ -32,21 +39,18 @@ final class BillingStatusController extends Controller
                         'ends_at' => $stripeSubscription->ends_at?->toISOString(),
                     ];
                 }
-            } catch (\Exception $e) {
-                // تجاهل أخطاء Stripe
+            } catch (Throwable) {
+                // The normalized local access snapshot remains available even
+                // if Stripe is temporarily unreachable.
             }
         }
 
-        // ✅ جلب Limits من الخطة
-        $limits = [];
-        if ($plan) {
-            $limits = [
-                'interviews' => $plan->interviews_limit ?? 0,
-                'jobs' => $plan->jobs_limit ?? 0,
-                'candidates' => $plan->candidates_limit ?? 0,
-                'employees' => $plan->max_employees ?? 1,
-            ];
-        }
+        $limits = $plan ? [
+            'interviews' => $plan->interviews_limit ?? 0,
+            'jobs' => $plan->jobs_limit ?? 0,
+            'candidates' => $plan->candidates_limit ?? 0,
+            'employees' => $plan->max_employees ?? 1,
+        ] : [];
 
         return response()->json([
             'success' => true,
@@ -58,10 +62,13 @@ final class BillingStatusController extends Controller
                     'status' => $company->status,
                     'is_approved' => $company->isApproved(),
                 ],
+                'subscription_access' => $access,
                 'billing' => [
-                    'status' => $company->billing_status?->value ?? 'none',
-                    'has_paid_access' => $company->hasPaidAccess(),
-                    'grace_ends_at' => $company->billing_grace_ends_at?->toISOString(),
+                    'status' => $access['billing_status'],
+                    'has_paid_access' => $access['has_paid_access'],
+                    'has_full_access' => $access['has_full_access'],
+                    'reason' => $access['reason'],
+                    'grace_ends_at' => $access['grace_ends_at'],
                     'locked_at' => $company->billing_locked_at?->toISOString(),
                     'trial_ends_at' => $company->trial_ends_at?->toISOString(),
                     'payment_method' => [

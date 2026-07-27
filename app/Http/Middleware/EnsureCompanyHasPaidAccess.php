@@ -3,76 +3,104 @@
 namespace App\Http\Middleware;
 
 use App\Models\Company;
-use App\Models\User;
+use App\Services\Billing\CompanySubscriptionAccessService;
 use Closure;
 use Illuminate\Http\Request;
+use Symfony\Component\HttpFoundation\Response;
 
 class EnsureCompanyHasPaidAccess
 {
-    public function handle(Request $request, Closure $next)
-    {
-        $user = $request->user();
+    public function __construct(
+        private readonly CompanySubscriptionAccessService $accessService,
+    ) {
+    }
 
-        if (!$user) {
+    public function handle(Request $request, Closure $next): Response
+    {
+        $actor = $request->user();
+
+        if (! $actor) {
             return response()->json([
                 'success' => false,
-                'message' => 'Unauthorized.',
-            ], 403);
+                'code' => 'unauthenticated',
+                'message' => $this->isArabic()
+                    ? 'يجب تسجيل الدخول للوصول إلى هذه العملية.'
+                    : 'You must be signed in to access this operation.',
+            ], Response::HTTP_UNAUTHORIZED);
         }
 
-        // ✅ إذا كان المستخدم Company Owner
-        if ($user instanceof Company) {
-            if (!$user->hasFullAccess()) {
-                $message = 'Your subscription is not active.';
+        $company = $this->accessService->resolveCompany($actor);
 
-                if ($user->billing_status && !$user->hasPaidAccess()) {
-                    $message = 'Your subscription has expired or is inactive. Please update your payment method.';
-                }
-
-                return response()->json([
-                    'success' => false,
-                    'message' => $message,
-                    'billing_status' => $user->billing_status?->value ?? 'none',
-                ], 403);
-            }
-
-            return $next($request);
+        if (! $company) {
+            return response()->json([
+                'success' => false,
+                'code' => 'company_not_found',
+                'message' => $this->isArabic()
+                    ? 'تعذر تحديد الشركة المرتبطة بهذا الحساب.'
+                    : 'The company linked to this account could not be resolved.',
+            ], Response::HTTP_FORBIDDEN);
         }
 
-        // ✅ إذا كان المستخدم موظف (User model مع is_company_employee = true)
-        if ($user instanceof User && $user->isCompanyEmployee()) {
-            // ✅ الموظف يعتبر جزء من الشركة، نتحقق من حالة الشركة
-            $company = $user->company;
+        $isOwner = $actor instanceof Company;
+        $access = $this->accessService->snapshot($company, $isOwner);
 
-            if (!$company) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Company not found for this employee.',
-                ], 403);
-            }
-
-            // ✅ إذا كانت الشركة غير نشطة أو ليس لديها اشتراك
-            if (!$company->hasFullAccess()) {
-                $message = 'Your company subscription is not active.';
-
-                if ($company->billing_status && !$company->hasPaidAccess()) {
-                    $message = 'Your company subscription has expired or is inactive. Please contact your company administrator.';
-                }
-
-                return response()->json([
-                    'success' => false,
-                    'message' => $message,
-                    'billing_status' => $company->billing_status?->value ?? 'none',
-                ], 403);
-            }
-
-            return $next($request);
+        if (! $access['company_approved']) {
+            return response()->json([
+                'success' => false,
+                'code' => 'company_not_approved',
+                'message' => $this->isArabic()
+                    ? 'يجب اعتماد الشركة من الإدارة قبل استخدام عمليات المنصة.'
+                    : 'The company must be approved before platform operations can be used.',
+                'data' => $access,
+            ], Response::HTTP_FORBIDDEN);
         }
 
-        // ❌ المستخدم غير معروف
-        return response()->json([
-            'success' => false,
-            'message' => 'Unauthorized.',
-        ], 403);
+        if (! $access['has_full_access']) {
+            return response()->json([
+                'success' => false,
+                'code' => 'subscription_required',
+                'message' => $this->messageFor($access['reason'], $isOwner),
+                'data' => $access,
+            ], Response::HTTP_PAYMENT_REQUIRED);
+        }
+
+        // Make the normalized state available to downstream controllers.
+        $request->attributes->set('company_subscription_access', $access);
+
+        return $next($request);
+    }
+
+    private function messageFor(?string $reason, bool $isOwner): string
+    {
+        $arabic = $this->isArabic();
+
+        if (! $isOwner) {
+            return $arabic
+                ? 'اشتراك الشركة غير فعّال حاليًا. راجع الخطط المتاحة وتواصل مع مالك الشركة لتفعيل الاشتراك.'
+                : 'Your company subscription is not active. Review the available plans and contact the company owner to activate it.';
+        }
+
+        return match ($reason) {
+            'no_plan' => $arabic
+                ? 'لم يتم اختيار خطة اشتراك بعد. اختر خطة مناسبة لتفعيل جميع عمليات الشركة.'
+                : 'No subscription plan has been selected yet. Choose a plan to unlock all company operations.',
+            'subscription_expired' => $arabic
+                ? 'انتهى اشتراك الشركة. جدّد الاشتراك أو اختر خطة للمتابعة.'
+                : 'The company subscription has expired. Renew it or choose a plan to continue.',
+            'checkout_pending' => $arabic
+                ? 'تم اختيار الخطة، لكن عملية الدفع لم تكتمل بعد.'
+                : 'A plan was selected, but checkout has not been completed yet.',
+            'payment_required' => $arabic
+                ? 'توجد مشكلة في دفع الاشتراك. حدّث بيانات الدفع لتجنب استمرار تقييد الحساب.'
+                : 'The subscription payment requires attention. Update billing to restore access.',
+            default => $arabic
+                ? 'اشتراك الشركة غير فعّال. اختر خطة أو حدّث الاشتراك للمتابعة.'
+                : 'The company subscription is inactive. Choose a plan or update the subscription to continue.',
+        };
+    }
+
+    private function isArabic(): bool
+    {
+        return app()->getLocale() === 'ar';
     }
 }

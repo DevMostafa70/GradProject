@@ -320,20 +320,19 @@ public function login(Request $request): JsonResponse
     public function notifications(Request $request): JsonResponse
     {
         $user = $request->user();
+        $perPage = max(1, min(100, (int) $request->integer('per_page', 20)));
 
         $notifications = $user->notifications()
-            ->orderBy('created_at', 'desc')
-            ->paginate($request->get('per_page', 20));
+            ->latest()
+            ->paginate($perPage);
 
         return response()->json([
             'success' => true,
-            'data' => $notifications->map(function ($notification) {
-                // ✅ التأكد من أن data هي Array (وليس String)
+            'data' => $notifications->getCollection()->map(function ($notification) {
                 $data = $notification->data;
 
-                // إذا كانت String، قم بتحويلها إلى Array
                 if (is_string($data)) {
-                    $data = json_decode($data, true);
+                    $data = json_decode($data, true) ?: [];
                 }
 
                 return [
@@ -346,12 +345,13 @@ public function login(Request $request): JsonResponse
                     'created_at' => $notification->created_at,
                     'is_read' => $notification->read_at !== null,
                 ];
-            }),
+            })->values(),
             'meta' => [
                 'current_page' => $notifications->currentPage(),
+                'last_page' => $notifications->lastPage(),
                 'total' => $notifications->total(),
                 'per_page' => $notifications->perPage(),
-                'unread_count' => $user->unreadNotifications->count(),
+                'unread_count' => $user->unreadNotifications()->count(),
             ],
         ]);
     }
@@ -360,7 +360,7 @@ public function login(Request $request): JsonResponse
      * Mark a notification as read
      * PUT /api/user/notifications/{id}/read
      */
-    public function markNotificationAsRead(string $id): JsonResponse
+    public function markNotificationAsRead(Request $request, string $id): JsonResponse
     {
         $user = $request->user();
         $notification = $user->notifications()->find($id);
@@ -377,6 +377,27 @@ public function login(Request $request): JsonResponse
         return response()->json([
             'success' => true,
             'message' => 'Notification marked as read',
+        ]);
+    }
+
+    /**
+     * Mark all notifications as read for the authenticated user.
+     * PUT /api/user/notifications/read-all
+     */
+    public function markAllNotificationsAsRead(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        $updated = $user->unreadNotifications()
+            ->update(['read_at' => now()]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'All notifications marked as read',
+            'data' => [
+                'updated_count' => $updated,
+                'unread_count' => 0,
+            ],
         ]);
     }
 

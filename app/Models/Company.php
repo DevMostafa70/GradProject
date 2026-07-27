@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\BillingStatus;
 use App\Services\CompanyEmployeeAccessService;
+use App\Services\Billing\CompanySubscriptionAccessService;
 use App\Notifications\Auth\NervuPasswordResetNotification;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -372,20 +373,18 @@ class Company extends Authenticatable
 
     public function hasPaidAccess(): bool
     {
-        if ($this->billing_status instanceof BillingStatus) {
-            return $this->billing_status->allowsPaidAccess();
-        }
-
-        return in_array($this->billing_status, ['active', 'trialing'], true);
+        return (bool) app(CompanySubscriptionAccessService::class)
+            ->snapshot($this, true)['has_paid_access'];
     }
 
     /**
      * التحقق من إمكانية الوصول الكامل للشركة
-     * (موافقة + اشتراك فعال)
+     * (موافقة + خطة مختارة + اشتراك فعال أو فترة سماح صالحة)
      */
     public function hasFullAccess(): bool
     {
-        return $this->isApproved() && $this->hasPaidAccess() && $this->hasSelectedPlan();
+        return (bool) app(CompanySubscriptionAccessService::class)
+            ->snapshot($this, true)['has_full_access'];
     }
 
     /**

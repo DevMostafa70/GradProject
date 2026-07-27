@@ -69,7 +69,7 @@ class CheckoutController extends Controller
                 ],
             ],
             'success_url' => config('interview_ai.frontend_url') . '/company/dashboard/plans/checkout-success?session_id={CHECKOUT_SESSION_ID}',
-            'cancel_url' => config('interview_ai.frontend_url') . '/company/billing/cancel',
+            'cancel_url' => config('interview_ai.frontend_url') . '/company/dashboard/plans/checkout-failed',
             'allow_promotion_codes' => true,
             'metadata' => [
                 'company_id' => (string) $company->id,

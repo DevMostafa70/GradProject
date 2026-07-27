@@ -7,6 +7,8 @@ use App\Http\Controllers\API\Candidate\CandidateAuthController;
 use App\Http\Controllers\API\CompanyAuthController;
 use App\Http\Controllers\API\Admin\AdminAuthController;
 use App\Http\Controllers\API\Admin\AdminBroadcastController;
+use App\Http\Controllers\API\Admin\AdminDevelopmentTeamController;
+use App\Http\Controllers\API\Public\PublicDevelopmentTeamController;
 use App\Http\Controllers\API\Admin\AdminCategoryController;
 use App\Http\Controllers\API\Admin\AdminCompanyController;
 use App\Http\Controllers\API\Admin\AdminController;
@@ -44,6 +46,9 @@ use App\Http\Controllers\API\Webhook\StripeWebhookController;
 */
 
 // ==================== Public Routes (No Auth Required) ====================
+
+Route::get('/development-team', PublicDevelopmentTeamController::class)
+    ->middleware('throttle:120,1');
 
 // ===== User (Regular User) Auth =====
 Route::prefix('user')->group(function () {
@@ -152,6 +157,7 @@ Route::prefix('user')->middleware(['auth:sanctum', 'checkrole:regular_user', 'th
 
     // ===== Notifications =====
     Route::get('/notifications', [UserAuthController::class, 'notifications']);
+    Route::put('/notifications/read-all', [UserAuthController::class, 'markAllNotificationsAsRead']);
     Route::put('/notifications/{id}/read', [UserAuthController::class, 'markNotificationAsRead']);
     Route::delete('/notifications', [UserAuthController::class, 'deleteAllNotifications']);
     Route::delete('/notifications/{id}', [UserAuthController::class, 'deleteNotification']);
@@ -176,13 +182,13 @@ Route::prefix('company')
         // ✅ Company Dashboard
         // ============================================================
         Route::get('/dashboard', [CompanyDashboardController::class, 'index'])
-            ->middleware('checkpermission:company.dashboard.view');
+            ->middleware(['company.paid', 'checkpermission:company.dashboard.view']);
 
         // ============================================================
         // ✅ Company Employee Management (فقط company_owner)
         // ============================================================
         Route::prefix('employees')
-            ->middleware('checkrole:company_owner')
+            ->middleware(['checkrole:company_owner', 'company.paid'])
             ->group(function () {
                 Route::get('/', [CompanyEmployeeController::class, 'index'])
                     ->middleware('checkpermission:company.employees.view');
@@ -238,7 +244,7 @@ Route::prefix('company')
         // ✅ Employee Limits (فقط company_owner)
         // ============================================================
         Route::get('/employee-limits', [CompanyEmployeeController::class, 'limits'])
-            ->middleware(['checkrole:company_owner', 'checkpermission:company.employees.view']);
+            ->middleware(['checkrole:company_owner', 'company.paid', 'checkpermission:company.employees.view']);
 
         // ============================================================
         // ✅ Routes المشتركة (لا تحتاج اشتراك فعال)
@@ -258,16 +264,19 @@ Route::prefix('company')
         // ✅ Notifications
         // ============================================================
         Route::get('/notifications', [CompanyAuthController::class, 'notifications'])
-            ->middleware('checkpermission:company.notifications.view');
+            ->middleware(['company.paid', 'checkpermission:company.notifications.view']);
+
+        Route::put('/notifications/read-all', [CompanyAuthController::class, 'markAllNotificationsAsRead'])
+            ->middleware(['company.paid', 'checkpermission:company.notifications.view']);
 
         Route::put('/notifications/{id}/read', [CompanyAuthController::class, 'markNotificationAsRead'])
-            ->middleware('checkpermission:company.notifications.view');
+            ->middleware(['company.paid', 'checkpermission:company.notifications.view']);
 
         Route::delete('/notifications', [CompanyAuthController::class, 'deleteAllNotifications'])
-            ->middleware('checkpermission:company.notifications.view');
+            ->middleware(['company.paid', 'checkpermission:company.notifications.view']);
 
         Route::delete('/notifications/{id}', [CompanyAuthController::class, 'deleteNotification'])
-            ->middleware('checkpermission:company.notifications.view');
+            ->middleware(['company.paid', 'checkpermission:company.notifications.view']);
 
         // ============================================================
         // ✅ Billing Routes
@@ -409,6 +418,27 @@ Route::prefix('admin')
                 Route::post('/{template}/toggle', [PermissionTemplateController::class, 'toggle'])
                     ->middleware('checkpermission:admin.roles.update');
             });
+
+
+        // ============================================================
+        // Development Team Management
+        // ============================================================
+        Route::prefix('development-team')->group(function () {
+            Route::get('/', [AdminDevelopmentTeamController::class, 'index'])
+                ->middleware('checkpermission:admin.development_team.view');
+            Route::post('/', [AdminDevelopmentTeamController::class, 'store'])
+                ->middleware('checkpermission:admin.development_team.create');
+            Route::put('/settings', [AdminDevelopmentTeamController::class, 'updateSettings'])
+                ->middleware('checkpermission:admin.development_team.update');
+            Route::post('/reorder', [AdminDevelopmentTeamController::class, 'reorder'])
+                ->middleware('checkpermission:admin.development_team.update');
+            Route::post('/{member}', [AdminDevelopmentTeamController::class, 'update'])
+                ->middleware('checkpermission:admin.development_team.update');
+            Route::post('/{member}/toggle', [AdminDevelopmentTeamController::class, 'toggle'])
+                ->middleware('checkpermission:admin.development_team.update');
+            Route::delete('/{member}', [AdminDevelopmentTeamController::class, 'destroy'])
+                ->middleware('checkpermission:admin.development_team.delete');
+        });
 
         // ============================================================
         // ✅ Users Management

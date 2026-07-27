@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Company;
 use App\Models\User;
 use App\Services\CompanyEmployeeAccessService;
+use App\Services\Billing\CompanySubscriptionAccessService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -76,7 +77,11 @@ public function register(Request $request): JsonResponse
  * Login company or employee
  * POST /api/company/login
  */
-public function login(Request $request, CompanyEmployeeAccessService $accessService): JsonResponse
+public function login(
+    Request $request,
+    CompanyEmployeeAccessService $accessService,
+    CompanySubscriptionAccessService $subscriptionAccessService
+): JsonResponse
 {
     $request->validate([
         'email' => 'required|email',
@@ -102,6 +107,7 @@ public function login(Request $request, CompanyEmployeeAccessService $accessServ
 
         $company->tokens()->delete();
         $token = $company->createToken('company-token')->plainTextToken;
+        $subscriptionAccess = $subscriptionAccessService->snapshot($company, true);
 
         return response()->json([
             'success' => true,
@@ -117,7 +123,9 @@ public function login(Request $request, CompanyEmployeeAccessService $accessServ
                     'roles' => $company->getRoleNames(),
                     'all_permissions' => $company->getAllPermissions()->pluck('name'),
                     'is_company_owner' => true,
+                    'subscription_access' => $subscriptionAccess,
                 ],
+                'subscription_access' => $subscriptionAccess,
                 'token' => $token,
                 'token_type' => 'Bearer',
             ],
@@ -172,6 +180,7 @@ public function login(Request $request, CompanyEmployeeAccessService $accessServ
     // Company employees are User models; resolve only user-guard access.
     $permissions = collect($accessService->permissionNames($employee));
     $employeeRoles = collect($accessService->roleNames($employee));
+    $subscriptionAccess = $subscriptionAccessService->snapshot($company, false);
 
     return response()->json([
         'success' => true,
@@ -188,7 +197,9 @@ public function login(Request $request, CompanyEmployeeAccessService $accessServ
                 'is_company_employee' => true,
                 'company_id' => $employee->company_id,
                 'company_name' => $company->company_name,
+                'subscription_access' => $subscriptionAccess,
             ],
+            'subscription_access' => $subscriptionAccess,
             'token' => $token,
             'token_type' => 'Bearer',
         ],
@@ -258,7 +269,11 @@ private function getEmployeeInfo($user): ?array
      * Return the authenticated company account and its effective permissions.
      * Works for both the company owner and company employees.
      */
-    public function me(Request $request, CompanyEmployeeAccessService $accessService): JsonResponse
+    public function me(
+        Request $request,
+        CompanyEmployeeAccessService $accessService,
+        CompanySubscriptionAccessService $subscriptionAccessService
+    ): JsonResponse
     {
         $actor = $request->user();
         $company = $this->resolveCompany($request);
@@ -277,6 +292,8 @@ private function getEmployeeInfo($user): ?array
             }
         }
 
+        $subscriptionAccess = $subscriptionAccessService->snapshot($company, $isOwner);
+
         $account = [
             'id' => $actor->id,
             'name' => $isOwner ? $company->company_name : $actor->name,
@@ -292,6 +309,7 @@ private function getEmployeeInfo($user): ?array
             'company_permission_template_id' => $isOwner
                 ? null
                 : $actor->company_permission_template_id,
+            'subscription_access' => $subscriptionAccess,
         ];
 
         return response()->json([
@@ -300,6 +318,7 @@ private function getEmployeeInfo($user): ?array
                 'account' => $account,
                 // Kept for backward compatibility with the current frontend.
                 'company' => $account,
+                'subscription_access' => $subscriptionAccess,
             ],
         ]);
     }
@@ -414,27 +433,19 @@ private function getEmployeeInfo($user): ?array
     public function notifications(Request $request): JsonResponse
     {
         $company = $this->resolveCompany($request);
+        $perPage = max(1, min(100, (int) $request->integer('per_page', 20)));
 
-        // ✅ Debug: تحقق من وجود المستخدم
-        Log::info('Company notifications request', [
-            'company_id' => $company->id,
-            'company_class' => get_class($company),
-        ]);
-
-        // ✅ جلب الإشعارات باستخدام DatabaseNotification مباشرة
-        $notifications = \Illuminate\Notifications\DatabaseNotification::where('notifiable_type', 'App\Models\Company')
-            ->where('notifiable_id', $company->id)
-            ->orderBy('created_at', 'desc')
-            ->paginate($request->get('per_page', 20));
-
-        Log::info('Notifications found: ' . $notifications->count());
+        $notifications = $company->notifications()
+            ->latest()
+            ->paginate($perPage);
 
         return response()->json([
             'success' => true,
-            'data' => $notifications->map(function ($notification) {
+            'data' => $notifications->getCollection()->map(function ($notification) {
                 $data = $notification->data;
+
                 if (is_string($data)) {
-                    $data = json_decode($data, true);
+                    $data = json_decode($data, true) ?: [];
                 }
 
                 return [
@@ -447,12 +458,13 @@ private function getEmployeeInfo($user): ?array
                     'created_at' => $notification->created_at,
                     'is_read' => $notification->read_at !== null,
                 ];
-            }),
+            })->values(),
             'meta' => [
                 'current_page' => $notifications->currentPage(),
+                'last_page' => $notifications->lastPage(),
                 'total' => $notifications->total(),
                 'per_page' => $notifications->perPage(),
-                'unread_count' => $notifications->whereNull('read_at')->count(),
+                'unread_count' => $company->unreadNotifications()->count(),
             ],
         ]);
     }
@@ -478,6 +490,27 @@ private function getEmployeeInfo($user): ?array
         return response()->json([
             'success' => true,
             'message' => 'Notification marked as read',
+        ]);
+    }
+
+    /**
+     * Mark all notifications as read for the authenticated company.
+     * PUT /api/company/notifications/read-all
+     */
+    public function markAllNotificationsAsRead(Request $request): JsonResponse
+    {
+        $company = $this->resolveCompany($request);
+
+        $updated = $company->unreadNotifications()
+            ->update(['read_at' => now()]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'All notifications marked as read',
+            'data' => [
+                'updated_count' => $updated,
+                'unread_count' => 0,
+            ],
         ]);
     }
 

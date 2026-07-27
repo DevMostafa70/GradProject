@@ -49,6 +49,10 @@ final class AdminPermissionCatalog
         'admin.permissions.create',
         'admin.permissions.update',
         'admin.permissions.delete',
+        'admin.development_team.view',
+        'admin.development_team.create',
+        'admin.development_team.update',
+        'admin.development_team.delete',
         'admin.settings.manage',
     ];
 
