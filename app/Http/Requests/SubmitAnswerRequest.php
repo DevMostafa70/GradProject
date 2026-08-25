@@ -40,7 +40,7 @@ class SubmitAnswerRequest extends FormRequest
                 'bail',
                 'required',
                 'file',
-                'max:102400',
+                'max:25600',
                 function (string $attribute, mixed $value, \Closure $fail): void {
                     $arabic = $this->input('locale') === 'ar' || app()->getLocale() === 'ar';
 
@@ -74,6 +74,7 @@ class SubmitAnswerRequest extends FormRequest
                 Rule::in([
                     'multiple_faces',
                     'looking_away',
+                    'face_missing',
                     'tab_switch',
                     'window_blur',
                     'fullscreen_exit',
@@ -107,7 +108,7 @@ class SubmitAnswerRequest extends FormRequest
             ? [
                 'audio_file.required' => 'تسجيل الصوت مطلوب.',
                 'audio_file.file' => 'تعذر رفع التسجيل الصوتي كملف.',
-                'audio_file.max' => 'يجب ألا يتجاوز حجم ملف الصوت 100 ميجابايت.',
+                'audio_file.max' => 'يجب ألا يتجاوز حجم ملف الصوت 25 ميجابايت.',
                 'duration_seconds.max' => 'يجب ألا تتجاوز مدة الإجابة 10 دقائق.',
                 'idempotency_key.required' => 'مفتاح منع التكرار مطلوب.',
                 'idempotency_key.regex' => 'مفتاح منع التكرار يمكن أن يحتوي فقط على أحرف وأرقام وشرطات.',
@@ -119,7 +120,7 @@ class SubmitAnswerRequest extends FormRequest
             : [
                 'audio_file.required' => 'Audio recording is required.',
                 'audio_file.file' => 'The audio recording could not be uploaded as a file.',
-                'audio_file.max' => 'The audio file size must not exceed 100MB.',
+                'audio_file.max' => 'The audio file size must not exceed 25MB.',
                 'duration_seconds.max' => 'The answer duration cannot exceed 10 minutes.',
                 'idempotency_key.required' => 'The idempotency key is required.',
                 'idempotency_key.regex' => 'The idempotency key may contain only letters, numbers, dashes, and underscores.',

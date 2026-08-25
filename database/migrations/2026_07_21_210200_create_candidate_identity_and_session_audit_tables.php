@@ -12,18 +12,18 @@ return new class extends Migration
             Schema::create('candidate_identity_verifications', function (Blueprint $table): void {
                 $table->id();
                 $table->foreignId('company_job_id')
-                    ->constrained('company_jobs')
+                    ->constrained('company_jobs', 'id', 'civ_company_job_fk')
                     ->cascadeOnDelete();
                 $table->foreignId('candidate_id')
-                    ->constrained('candidates')
+                    ->constrained('candidates', 'id', 'civ_candidate_fk')
                     ->cascadeOnDelete();
                 $table->foreignId('company_job_candidate_id')
                     ->nullable()
-                    ->constrained('company_job_candidates')
+                    ->constrained('company_job_candidates', 'id', 'civ_cand_job_fk')
                     ->nullOnDelete();
                 $table->foreignId('interview_id')
                     ->nullable()
-                    ->constrained('interviews')
+                    ->constrained('interviews', 'id', 'civ_interview_fk')
                     ->nullOnDelete();
                 $table->string('status', 30)->default('pending');
                 $table->string('document_type', 40)->nullable();
@@ -55,15 +55,15 @@ return new class extends Migration
             Schema::create('candidate_identity_evidences', function (Blueprint $table): void {
                 $table->id();
                 $table->foreignId('verification_id')
-                    ->constrained('candidate_identity_verifications')
+                    ->constrained('candidate_identity_verifications', 'id', 'cie_verification_fk')
                     ->cascadeOnDelete();
                 $table->foreignId('interview_id')
                     ->nullable()
-                    ->constrained('interviews')
+                    ->constrained('interviews', 'id', 'cie_interview_fk')
                     ->nullOnDelete();
                 $table->foreignId('question_id')
                     ->nullable()
-                    ->constrained('questions')
+                    ->constrained('questions', 'id', 'cie_question_fk')
                     ->nullOnDelete();
                 $table->string('type', 40);
                 $table->string('disk', 40)->default('local');
@@ -91,7 +91,7 @@ return new class extends Migration
             Schema::create('candidate_liveness_challenges', function (Blueprint $table): void {
                 $table->id();
                 $table->foreignId('verification_id')
-                    ->constrained('candidate_identity_verifications')
+                    ->constrained('candidate_identity_verifications', 'id', 'clc_verification_fk')
                     ->cascadeOnDelete();
                 $table->unsignedTinyInteger('sequence');
                 $table->string('challenge_type', 40);
@@ -100,7 +100,7 @@ return new class extends Migration
                 $table->decimal('confidence_score', 5, 2)->nullable();
                 $table->foreignId('evidence_id')
                     ->nullable()
-                    ->constrained('candidate_identity_evidences')
+                    ->constrained('candidate_identity_evidences', 'id', 'clc_evidence_fk')
                     ->nullOnDelete();
                 $table->timestamp('started_at')->nullable();
                 $table->timestamp('completed_at')->nullable();
@@ -118,7 +118,7 @@ return new class extends Migration
             Schema::create('candidate_interview_session_events', function (Blueprint $table): void {
                 $table->id();
                 $table->foreignId('interview_id')
-                    ->constrained('interviews')
+                    ->constrained('interviews', 'id', 'cise_interview_fk')
                     ->cascadeOnDelete();
                 $table->string('session_instance_id', 100)->nullable();
                 $table->string('event_type', 40);
@@ -144,11 +144,11 @@ return new class extends Migration
             Schema::create('candidate_interview_snapshot_requests', function (Blueprint $table): void {
                 $table->id();
                 $table->foreignId('interview_id')
-                    ->constrained('interviews')
+                    ->constrained('interviews', 'id', 'cisr_interview_fk')
                     ->cascadeOnDelete();
                 $table->foreignId('question_id')
                     ->nullable()
-                    ->constrained('questions')
+                    ->constrained('questions', 'id', 'cisr_question_fk')
                     ->nullOnDelete();
                 $table->char('request_token_hash', 64)
                     ->nullable()
