@@ -14,10 +14,15 @@ class AudioTranscriptionService
 {
     protected string $audioServiceUrl;
 
+
+    // http://127.0.0.1:5001/analyze
     public function __construct()
-    {
-        $this->audioServiceUrl = env('AUDIO_SERVICE_URL', 'http://127.0.0.1:5001');
-    }
+{
+    $this->audioServiceUrl = rtrim(
+        (string) config('services.audio_service.url'),
+        '/'
+    );
+}
 
     public function transcribe($audioFile, ?string $locale = null): array
     {
