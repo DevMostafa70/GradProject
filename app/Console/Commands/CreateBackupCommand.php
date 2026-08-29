@@ -28,6 +28,12 @@ class CreateBackupCommand extends Command
 
     public function handle(): int
     {
+        $backupPath = null;
+        $zipPath = null;
+        $storedPath = null;
+        $backupRecordCreated = false;
+        $backupDisk = (string) config('uploads.backup_disk', 'local');
+
         $this->info('🔄 Starting database backup...');
 
         try {
@@ -49,12 +55,14 @@ class CreateBackupCommand extends Command
             $filename = "backup_{$timestamp}.sql";
             $zipFilename = "backup_{$timestamp}.zip";
 
-            $backupPath = storage_path("app/backups/{$filename}");
-            $zipPath = storage_path("app/backups/{$zipFilename}");
+            $temporaryDirectory = storage_path('app/backups/tmp');
+            $temporaryPrefix = Str::uuid()->toString();
+            $backupPath = $temporaryDirectory . DIRECTORY_SEPARATOR . "{$temporaryPrefix}_{$filename}";
+            $zipPath = $temporaryDirectory . DIRECTORY_SEPARATOR . "{$temporaryPrefix}_{$zipFilename}";
 
             // Create backup directory if not exists
-            if (!is_dir(storage_path('app/backups'))) {
-                mkdir(storage_path('app/backups'), 0755, true);
+            if (!is_dir($temporaryDirectory)) {
+                mkdir($temporaryDirectory, 0755, true);
             }
 
             // Build mysqldump command
@@ -110,15 +118,37 @@ class CreateBackupCommand extends Command
             $zip->addFile($backupPath, $filename);
             $zip->close();
 
-            // Delete the original SQL file
-            unlink($backupPath);
-
             $fileSize = filesize($zipPath);
+
+            if ($fileSize === false) {
+                throw new \Exception('Failed to determine backup ZIP size');
+            }
+
+            $storedPath = "backups/{$zipFilename}";
+            $zipStream = fopen($zipPath, 'rb');
+
+            if ($zipStream === false) {
+                throw new \Exception('Failed to open backup ZIP for upload');
+            }
+
+            try {
+                $uploaded = Storage::disk($backupDisk)->writeStream(
+                    $storedPath,
+                    $zipStream,
+                    ['visibility' => 'private']
+                );
+            } finally {
+                fclose($zipStream);
+            }
+
+            if (!$uploaded) {
+                throw new \Exception("Failed to upload backup ZIP to disk [{$backupDisk}]");
+            }
 
             // Create backup record
             $backup = Backup::create([
                 'filename' => $zipFilename,
-                'file_path' => "backups/{$zipFilename}",
+                'file_path' => $storedPath,
                 'size' => $fileSize,
                 'status' => Backup::STATUS_COMPLETED,
                 'type' => $type,
@@ -133,6 +163,7 @@ class CreateBackupCommand extends Command
                     'original_filename' => $filename,
                 ],
             ]);
+            $backupRecordCreated = true;
 
             $this->info('✅ Backup created successfully!');
             $this->info("📁 File: {$zipFilename}");
@@ -149,6 +180,10 @@ class CreateBackupCommand extends Command
             return Command::SUCCESS;
 
         } catch (\Exception $e) {
+            if ($storedPath !== null && !$backupRecordCreated) {
+                Storage::disk($backupDisk)->delete($storedPath);
+            }
+
             $this->error('❌ Backup failed: ' . $e->getMessage());
 
             Log::error('Backup failed', [
@@ -157,6 +192,12 @@ class CreateBackupCommand extends Command
             ]);
 
             return Command::FAILURE;
+        } finally {
+            foreach ([$backupPath, $zipPath] as $temporaryFile) {
+                if (is_string($temporaryFile) && is_file($temporaryFile)) {
+                    @unlink($temporaryFile);
+                }
+            }
         }
     }
 }

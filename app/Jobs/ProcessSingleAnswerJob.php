@@ -20,7 +20,6 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use OpenAI\Laravel\Facades\OpenAI;
-use Illuminate\Support\Facades\Storage;
 
 class ProcessSingleAnswerJob implements ShouldQueue
 {
@@ -55,6 +54,7 @@ class ProcessSingleAnswerJob implements ShouldQueue
             $this->answer->refresh();
             $interview = $this->answer->interview()->firstOrFail();
             $locale = $interview->normalizedLocale();
+            $audioDisk = $this->answer->audioStorageDisk();
             app()->setLocale($locale);
 
             // Queue retries are idempotent. If the answer was already fully
@@ -91,7 +91,11 @@ class ProcessSingleAnswerJob implements ShouldQueue
                 'answer_id' => $this->answer->id
             ]);
 
-            $transcriptionResult = $transcriptionService->transcribe($this->audioFilePath, $locale);
+            $transcriptionResult = $transcriptionService->transcribe(
+                $this->audioFilePath,
+                $locale,
+                $audioDisk
+            );
 
             if (!$transcriptionResult['success']) {
                 Log::error('Transcription failed for answer', [
@@ -107,14 +111,15 @@ class ProcessSingleAnswerJob implements ShouldQueue
                 // Step 2: Update answer with real transcription
                 $this->answer->update([
                     'transcription' => $transcriptionResult['transcript'],
-                    'processing_metadata' => [
+                    'processing_metadata' => array_merge($this->answer->processing_metadata ?? [], [
                         'transcription_confidence' => $transcriptionResult['confidence'],
                         'transcription_model' => $transcriptionResult['model_used'] ?? 'whisper-1',
                         'transcription_language' => $transcriptionResult['language'] ?? $locale,
                         'interview_locale' => $locale,
+                        'storage_disk' => $audioDisk,
                         'word_count' => $transcriptionResult['word_count'],
                         'transcribed_at' => now()->toISOString(),
-                    ]
+                    ])
                 ]);
 
                 Log::info('Transcription completed successfully', [
@@ -281,12 +286,8 @@ class ProcessSingleAnswerJob implements ShouldQueue
             // ============================================================
             // 🔹 NEW: Clean up audio file with privacy logging
             // ============================================================
-            if (Storage::disk('public')->delete($this->audioFilePath)) {
+            if ($this->answer->deleteAudioFile()) {
                 // 🔹 NEW: Record deletion timestamp for privacy
-                $this->answer->update([
-                    'audio_deleted_at' => now(),
-                ]);
-
                 Log::info('Audio file deleted after processing (privacy)', [
                     'answer_id' => $this->answer->id,
                     'interview_id' => $this->answer->interview_id,
@@ -316,10 +317,10 @@ class ProcessSingleAnswerJob implements ShouldQueue
 
             $this->answer->update([
                 'status' => Answer::STATUS_FAILED,
-                'processing_metadata' => [
+                'processing_metadata' => array_merge($this->answer->processing_metadata ?? [], [
                     'error' => $e->getMessage(),
                     'failed_at' => now()->toISOString(),
-                ]
+                ])
             ]);
 
             $this->answer->question->update(['status' => Question::STATUS_PENDING]);

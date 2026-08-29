@@ -43,8 +43,13 @@ public function upload($user, UploadedFile $file, ?string $targetPosition = null
     $extension = $file->getClientOriginalExtension();
     $fileName = time() . '_' . preg_replace('/[^a-zA-Z0-9._-]/', '_', $originalName);
 
-    // Store file
-    $path = $file->storeAs('resumes', $fileName, 'public');
+    // Store file privately. The configured disk may be local or remote.
+    $disk = (string) config('uploads.private_disk', 'local');
+    $path = $file->storeAs('resumes', $fileName, $disk);
+
+    if ($path === false) {
+        throw new \RuntimeException('Failed to store the resume file.');
+    }
 
     // Create resume record
     $resume = Resume::create([
@@ -65,35 +70,42 @@ public function upload($user, UploadedFile $file, ?string $targetPosition = null
      */
     public function extractText(Resume $resume): string
     {
-        $filePath = Storage::disk('public')->path($resume->file_path);
+        $temporaryPath = null;
 
-        $text = '';
+        try {
+            $temporaryPath = $this->prepareLocalResumeFile($resume);
+            $text = '';
 
-        switch ($resume->file_type) {
-            case 'pdf':
-                $text = $this->extractFromPdf($filePath);
-                break;
-            case 'docx':
-                $text = $this->extractFromDocx($filePath);
-                break;
-            case 'txt':
-                $text = file_get_contents($filePath);
-                break;
-            default:
-                throw new \Exception('Unsupported file type: ' . $resume->file_type);
+            switch (strtolower($resume->file_type)) {
+                case 'pdf':
+                    $text = $this->extractFromPdf($temporaryPath);
+                    break;
+                case 'docx':
+                    $text = $this->extractFromDocx($temporaryPath);
+                    break;
+                case 'txt':
+                    $text = file_get_contents($temporaryPath);
+                    break;
+                default:
+                    throw new \Exception('Unsupported file type: ' . $resume->file_type);
+            }
+
+            // Clean text (remove extra spaces, normalize line breaks)
+            $text = preg_replace('/\s+/', ' ', $text);
+            $text = trim($text);
+
+            // Update resume with extracted text
+            $resume->update([
+                'extracted_text' => $text,
+                'status' => 'processing',
+            ]);
+
+            return $text;
+        } finally {
+            if ($temporaryPath !== null && is_file($temporaryPath)) {
+                @unlink($temporaryPath);
+            }
         }
-
-        // Clean text (remove extra spaces, normalize line breaks)
-        $text = preg_replace('/\s+/', ' ', $text);
-        $text = trim($text);
-
-        // Update resume with extracted text
-        $resume->update([
-            'extracted_text' => $text,
-            'status' => 'processing',
-        ]);
-
-        return $text;
     }
 
     /**
@@ -224,10 +236,76 @@ public function upload($user, UploadedFile $file, ?string $targetPosition = null
     public function delete(Resume $resume): bool
     {
         // Delete file from storage
-        if (Storage::disk('public')->exists($resume->file_path)) {
-            Storage::disk('public')->delete($resume->file_path);
+        $storage = Storage::disk((string) config('uploads.private_disk', 'local'));
+
+        if ($storage->exists($resume->file_path)) {
+            $storage->delete($resume->file_path);
         }
 
         return $resume->delete();
+    }
+
+    private function prepareLocalResumeFile(Resume $resume): string
+    {
+        $diskName = (string) config('uploads.private_disk', 'local');
+        $storage = Storage::disk($diskName);
+
+        if (!$storage->exists($resume->file_path)) {
+            throw new \RuntimeException("Resume file not found on disk [{$diskName}].");
+        }
+
+        $source = $storage->readStream($resume->file_path);
+
+        if ($source === false) {
+            throw new \RuntimeException("Unable to read resume file from disk [{$diskName}].");
+        }
+
+        $basePath = tempnam(sys_get_temp_dir(), 'resume_');
+
+        if ($basePath === false) {
+            fclose($source);
+            throw new \RuntimeException('Unable to create a temporary resume file.');
+        }
+
+        $temporaryPath = $basePath;
+        $extension = strtolower((string) $resume->file_type);
+
+        if ($extension !== '' && preg_match('/^[a-z0-9]{1,10}$/', $extension) === 1) {
+            $temporaryPath = $basePath . '.' . $extension;
+
+            if (!rename($basePath, $temporaryPath)) {
+                fclose($source);
+                @unlink($basePath);
+                throw new \RuntimeException('Unable to prepare the temporary resume filename.');
+            }
+        }
+
+        $destination = fopen($temporaryPath, 'wb');
+
+        if ($destination === false) {
+            fclose($source);
+            @unlink($temporaryPath);
+            throw new \RuntimeException('Unable to open the temporary resume file for writing.');
+        }
+
+        $copyException = null;
+
+        try {
+            if (stream_copy_to_stream($source, $destination) === false) {
+                throw new \RuntimeException('Unable to copy the stored resume into a temporary file.');
+            }
+        } catch (\Throwable $e) {
+            $copyException = $e;
+        } finally {
+            fclose($source);
+            fclose($destination);
+        }
+
+        if ($copyException !== null) {
+            @unlink($temporaryPath);
+            throw $copyException;
+        }
+
+        return $temporaryPath;
     }
 }

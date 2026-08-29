@@ -4,7 +4,10 @@ return [
     'frontend_url' => rtrim(env('FRONTEND_URL', 'http://localhost:5173'), '/'),
 
     'identity' => [
-        'disk' => env('COMPANY_INTERVIEW_IDENTITY_DISK', 'local'),
+        'disk' => env(
+            'COMPANY_INTERVIEW_IDENTITY_DISK',
+            env('PRIVATE_UPLOAD_DISK', 'local')
+        ),
         'max_document_kb' => (int) env('COMPANY_INTERVIEW_MAX_DOCUMENT_KB', 10240),
         'max_image_kb' => (int) env('COMPANY_INTERVIEW_MAX_IMAGE_KB', 5120),
     ],

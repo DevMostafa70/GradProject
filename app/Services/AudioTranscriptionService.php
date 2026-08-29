@@ -17,31 +17,24 @@ class AudioTranscriptionService
 
     // http://127.0.0.1:5001/analyze
     public function __construct()
-{
-    $this->audioServiceUrl = rtrim(
-        (string) config('services.audio_service.url'),
-        '/'
-    );
-}
+    {
+        $this->audioServiceUrl = rtrim(
+            (string) config('services.audio_service.url'),
+            '/'
+        );
+    }
 
-    public function transcribe($audioFile, ?string $locale = null): array
+    public function transcribe($audioFile, ?string $locale = null, ?string $disk = null): array
     {
         $locale = $this->normalizeLocale($locale);
+        $preparedFile = null;
+        $resource = null;
 
         try {
-            if ($audioFile instanceof UploadedFile) {
-                $filePath = $audioFile->getRealPath();
-                $originalName = $audioFile->getClientOriginalName();
-            } else {
-                $filePath = Storage::disk('public')->path($audioFile);
-                $originalName = basename($audioFile);
-            }
-
-            if (!file_exists($filePath)) {
-                throw new Exception("Audio file not found at path: {$filePath}");
-            }
-
-            $fileSize = filesize($filePath);
+            $preparedFile = $this->prepareLocalAudioFile($audioFile, $disk);
+            $filePath = $preparedFile['path'];
+            $originalName = $preparedFile['name'];
+            $fileSize = $preparedFile['size'];
             $maxSize = 25 * 1024 * 1024;
 
             if ($fileSize > $maxSize) {
@@ -63,7 +56,11 @@ class AudioTranscriptionService
                 'size' => $fileSize,
             ]);
 
-            $resource = fopen($filePath, 'r');
+            $resource = fopen($filePath, 'rb');
+
+            if ($resource === false) {
+                throw new Exception("Unable to open audio file: {$originalName}");
+            }
 
             $response = OpenAI::audio()->transcribe([
                 'model' => 'whisper-1',
@@ -72,10 +69,6 @@ class AudioTranscriptionService
                 'language' => $locale,
                 'temperature' => 0.2,
             ]);
-
-            if (is_resource($resource)) {
-                fclose($resource);
-            }
 
             $transcript = $response->text ?? '';
             $language = $response->language ?? $locale;
@@ -113,10 +106,6 @@ class AudioTranscriptionService
             ];
 
         } catch (Exception $e) {
-            if (isset($resource) && is_resource($resource)) {
-                fclose($resource);
-            }
-
             Log::error('Whisper transcription failed', [
                 'error' => $e->getMessage(),
                 'file' => $originalName ?? 'unknown',
@@ -131,27 +120,27 @@ class AudioTranscriptionService
                 'duration' => null,
                 'word_count' => 0,
             ];
+        } finally {
+            if (is_resource($resource)) {
+                fclose($resource);
+            }
+
+            $this->cleanupPreparedAudioFile($preparedFile);
         }
     }
 
-    public function transcribeWithGPT4oMini($audioFile, ?string $locale = null): array
+    public function transcribeWithGPT4oMini($audioFile, ?string $locale = null, ?string $disk = null): array
     {
         $locale = $this->normalizeLocale($locale);
+        $preparedFile = null;
+        $resource = null;
+        $fallback = false;
 
         try {
-            if ($audioFile instanceof UploadedFile) {
-                $filePath = $audioFile->getRealPath();
-                $originalName = $audioFile->getClientOriginalName();
-            } else {
-                $filePath = Storage::disk('public')->path($audioFile);
-                $originalName = basename($audioFile);
-            }
-
-            if (!file_exists($filePath)) {
-                throw new Exception("Audio file not found at path: {$filePath}");
-            }
-
-            $fileSize = filesize($filePath);
+            $preparedFile = $this->prepareLocalAudioFile($audioFile, $disk);
+            $filePath = $preparedFile['path'];
+            $originalName = $preparedFile['name'];
+            $fileSize = $preparedFile['size'];
             $maxSize = 25 * 1024 * 1024;
 
             if ($fileSize > $maxSize) {
@@ -167,7 +156,11 @@ class AudioTranscriptionService
                 'file' => $originalName,
             ]);
 
-            $resource = fopen($filePath, 'r');
+            $resource = fopen($filePath, 'rb');
+
+            if ($resource === false) {
+                throw new Exception("Unable to open audio file: {$originalName}");
+            }
 
             $response = OpenAI::audio()->transcribe([
                 'model' => 'gpt-4o-mini-transcribe',
@@ -178,10 +171,6 @@ class AudioTranscriptionService
                     ? 'هذه إجابة في مقابلة عمل. اكتب الكلام المنطوق بدقة كما هو باللغة العربية، مع الحفاظ على المصطلحات التقنية.'
                     : 'This is a job interview answer. Transcribe the spoken English accurately and preserve technical terms.',
             ]);
-
-            if (is_resource($resource)) {
-                fclose($resource);
-            }
 
             $transcript = $response->text ?? '';
             $wordCount = $this->countWords($transcript);
@@ -202,13 +191,25 @@ class AudioTranscriptionService
                 'fallback' => 'using whisper-1',
             ]);
 
-            return $this->transcribe($audioFile, $locale);
+            $fallback = true;
+        } finally {
+            if (is_resource($resource)) {
+                fclose($resource);
+            }
+
+            $this->cleanupPreparedAudioFile($preparedFile);
         }
+
+        if ($fallback) {
+            return $this->transcribe($audioFile, $locale, $disk);
+        }
+
+        throw new Exception('Audio transcription failed without a fallback result.');
     }
 
-    public function transcribeAuto($audioFile, ?string $locale = null): array
+    public function transcribeAuto($audioFile, ?string $locale = null, ?string $disk = null): array
     {
-        return $this->transcribeWithGPT4oMini($audioFile, $locale);
+        return $this->transcribeWithGPT4oMini($audioFile, $locale, $disk);
     }
 
     /**
@@ -216,22 +217,26 @@ class AudioTranscriptionService
      */
     public function analyzeAudio($audioFile, Answer $answer): array
     {
-        try {
-            if ($audioFile instanceof UploadedFile) {
-                $filePath = $audioFile->getRealPath();
-            } else {
-                $filePath = Storage::disk('public')->path($audioFile);
-            }
+        $preparedFile = null;
+        $resource = null;
 
-            if (!file_exists($filePath)) {
-                throw new Exception("Audio file not found at path: {$filePath}");
+        try {
+            $preparedFile = $this->prepareLocalAudioFile(
+                $audioFile,
+                $answer->audioStorageDisk()
+            );
+            $filePath = $preparedFile['path'];
+            $resource = fopen($filePath, 'rb');
+
+            if ($resource === false) {
+                throw new Exception("Unable to open audio file: {$preparedFile['name']}");
             }
 
             $response = Http::timeout(120)
                 ->attach(
                     'audio_file',
-                    fopen($filePath, 'r'),
-                    basename($filePath)
+                    $resource,
+                    $preparedFile['name']
                 )
                 ->post($this->audioServiceUrl . '/analyze');
 
@@ -281,7 +286,130 @@ class AudioTranscriptionService
             ]);
 
             return $this->fallbackAudioAnalysis($answer);
+        } finally {
+            if (is_resource($resource)) {
+                fclose($resource);
+            }
+
+            $this->cleanupPreparedAudioFile($preparedFile);
         }
+    }
+
+    /**
+     * Prepare uploaded or remotely stored audio for libraries that require a local path.
+     *
+     * @return array{path: string, name: string, size: int, temporary: bool}
+     */
+    private function prepareLocalAudioFile($audioFile, ?string $disk = null): array
+    {
+        if ($audioFile instanceof UploadedFile) {
+            $path = $audioFile->getRealPath();
+
+            if ($path === false || !is_file($path)) {
+                throw new Exception('Uploaded audio temporary file is unavailable.');
+            }
+
+            $size = $audioFile->getSize();
+
+            return [
+                'path' => $path,
+                'name' => $audioFile->getClientOriginalName(),
+                'size' => $size === false ? (int) filesize($path) : (int) $size,
+                'temporary' => false,
+            ];
+        }
+
+        if (!is_string($audioFile) || $audioFile === '') {
+            throw new Exception('Stored audio path is invalid.');
+        }
+
+        $diskName = $disk ?: $this->configuredAudioDisk();
+        $storage = Storage::disk($diskName);
+
+        if (!$storage->exists($audioFile)) {
+            throw new Exception("Audio file not found on disk [{$diskName}]: {$audioFile}");
+        }
+
+        $source = $storage->readStream($audioFile);
+
+        if ($source === false) {
+            throw new Exception("Unable to read audio file from disk [{$diskName}]: {$audioFile}");
+        }
+
+        $basePath = tempnam(sys_get_temp_dir(), 'interview_audio_');
+
+        if ($basePath === false) {
+            fclose($source);
+            throw new Exception('Unable to create a temporary audio file.');
+        }
+
+        $temporaryPath = $basePath;
+        $extension = strtolower((string) pathinfo($audioFile, PATHINFO_EXTENSION));
+
+        if ($extension !== '' && preg_match('/^[a-z0-9]{1,10}$/', $extension) === 1) {
+            $temporaryPath = $basePath . '.' . $extension;
+
+            if (!rename($basePath, $temporaryPath)) {
+                fclose($source);
+                @unlink($basePath);
+                throw new Exception('Unable to prepare the temporary audio filename.');
+            }
+        }
+
+        $destination = fopen($temporaryPath, 'wb');
+
+        if ($destination === false) {
+            fclose($source);
+            @unlink($temporaryPath);
+            throw new Exception('Unable to open the temporary audio file for writing.');
+        }
+
+        $copyException = null;
+
+        try {
+            if (stream_copy_to_stream($source, $destination) === false) {
+                throw new Exception('Unable to copy the stored audio into a temporary file.');
+            }
+        } catch (\Throwable $e) {
+            $copyException = $e;
+        } finally {
+            fclose($source);
+            fclose($destination);
+        }
+
+        if ($copyException !== null) {
+            @unlink($temporaryPath);
+            throw $copyException;
+        }
+
+        $size = filesize($temporaryPath);
+
+        if ($size === false) {
+            @unlink($temporaryPath);
+            throw new Exception('Unable to determine the temporary audio file size.');
+        }
+
+        return [
+            'path' => $temporaryPath,
+            'name' => basename($audioFile),
+            'size' => (int) $size,
+            'temporary' => true,
+        ];
+    }
+
+    private function cleanupPreparedAudioFile(?array $preparedFile): void
+    {
+        if (($preparedFile['temporary'] ?? false) && is_file($preparedFile['path'] ?? '')) {
+            @unlink($preparedFile['path']);
+        }
+    }
+
+    private function configuredAudioDisk(): string
+    {
+        return (string) config(
+            'interview_ai.audio.storage_disk',
+            config('uploads.audio_disk', 'public')
+        );
     }
 
     private function fallbackAudioAnalysis(Answer $answer): array

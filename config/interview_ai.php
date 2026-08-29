@@ -90,7 +90,10 @@ return [
          * Storage disk used for audio files
          * Default: public
          */
-        'storage_disk' => env('AUDIO_STORAGE_DISK', 'public'),
+        'storage_disk' => env(
+            'AUDIO_STORAGE_DISK',
+            env('PUBLIC_UPLOAD_DISK', 'public')
+        ),
 
         /*
          * Path prefix for audio files

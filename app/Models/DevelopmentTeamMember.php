@@ -63,6 +63,7 @@ final class DevelopmentTeamMember extends Model
             return null;
         }
 
-        return asset("storage/" . $this->image_path);
+        return Storage::disk((string) config('uploads.public_disk', 'public'))
+            ->url($this->image_path);
     }
 }

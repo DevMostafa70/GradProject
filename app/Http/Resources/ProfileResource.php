@@ -4,17 +4,24 @@ namespace App\Http\Resources;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Support\Facades\Storage;
 
 class ProfileResource extends JsonResource
 {
     public function toArray(Request $request): array
     {
+        $avatarPath = $this->avatar
+            ? (preg_replace('#^/?storage/#', '', $this->avatar) ?? $this->avatar)
+            : null;
+
         return [
             'locale' => $this->locale,
             'id' => $this->id,
             'name' => $this->name,
             'email' => $this->email,
-            'avatar' => $this->avatar ? asset('storage/' . $this->avatar) : null,
+            'avatar' => $avatarPath
+                ? Storage::disk((string) config('uploads.public_disk', 'public'))->url($avatarPath)
+                : null,
             'bio' => $this->bio,
             'role' => $this->role,
             'is_active' => $this->is_active,

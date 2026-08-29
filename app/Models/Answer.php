@@ -40,6 +40,20 @@ class Answer extends Model
     const STATUS_EVALUATED = 'evaluated';
     const STATUS_FAILED = 'failed';
 
+    public function audioStorageDisk(): string
+    {
+        $storedDisk = data_get($this->processing_metadata, 'storage_disk');
+
+        if (is_string($storedDisk) && $storedDisk !== '') {
+            return $storedDisk;
+        }
+
+        return (string) config(
+            'interview_ai.audio.storage_disk',
+            config('uploads.audio_disk', 'public')
+        );
+    }
+
     public function interview(): BelongsTo
     {
         return $this->belongsTo(Interview::class);
@@ -124,9 +138,8 @@ class Answer extends Model
             return false;
         }
 
-        return \Illuminate\Support\Facades\Storage::disk(
-            config('interview_ai.audio.storage_disk', 'public')
-        )->exists($this->audio_file_path);
+        return \Illuminate\Support\Facades\Storage::disk($this->audioStorageDisk())
+            ->exists($this->audio_file_path);
     }
 
     /**
@@ -146,7 +159,7 @@ class Answer extends Model
             return false;
         }
 
-        $disk = config('interview_ai.audio.storage_disk', 'public');
+        $disk = $this->audioStorageDisk();
 
         if (\Illuminate\Support\Facades\Storage::disk($disk)->exists($this->audio_file_path)) {
             \Illuminate\Support\Facades\Storage::disk($disk)->delete($this->audio_file_path);
@@ -175,9 +188,8 @@ class Answer extends Model
             return null;
         }
 
-        return \Illuminate\Support\Facades\Storage::disk(
-            config('interview_ai.audio.storage_disk', 'public')
-        )->url($this->audio_file_path);
+        return \Illuminate\Support\Facades\Storage::disk($this->audioStorageDisk())
+            ->url($this->audio_file_path);
     }
 
     /**

@@ -11,6 +11,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Support\Facades\Storage;
 use Laravel\Sanctum\HasApiTokens;
 use Laravel\Cashier\Billable;
 use Spatie\Permission\Traits\HasRoles;
@@ -129,7 +130,9 @@ class Company extends Authenticatable
 
     public function getLogoUrlAttribute(): ?string
     {
-        return $this->logo ? asset('storage/' . $this->logo) : null;
+        return $this->logo
+            ? Storage::disk((string) config('uploads.public_disk', 'public'))->url($this->logo)
+            : null;
     }
 
     public function stripeName(): ?string
